@@ -9,16 +9,17 @@ import os
 
 from talisman_ai import config
 
-# Import auth utilities for creating signed headers
-api_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "api")
-if os.path.exists(api_path):
-    sys.path.insert(0, api_path)
-    try:
-        from auth_utils import create_auth_message, sign_message
-    except ImportError:
-        # If auth_utils not available, we'll use a fallback
-        create_auth_message = None
-        sign_message = None
+# Auth utilities for creating signed headers (defined inline, not imported from API)
+def create_auth_message(timestamp=None):
+    """Create a standardized authentication message"""
+    if timestamp is None:
+        timestamp = time.time()
+    return f"talisman-ai-auth:{int(timestamp)}"
+
+def sign_message(wallet, message):
+    """Sign a message with the wallet's hotkey"""
+    signature = wallet.hotkey.sign(message)
+    return signature.hex()
 
 # Type alias for the batch callback function
 # Signature: (batch_id: int, batch: List[Dict[str, Any]]) -> Union[asyncio.Future, None, Any]
@@ -77,7 +78,7 @@ class BatchClient:
     def _create_auth_headers(self) -> Dict[str, str]:
         """Create authentication headers if wallet is available"""
         headers = {}
-        if self.wallet and create_auth_message and sign_message:
+        if self.wallet:
             try:
                 timestamp = time.time()
                 message = create_auth_message(timestamp)

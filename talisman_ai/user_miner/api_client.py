@@ -15,19 +15,17 @@ from typing import Dict, Optional
 
 from talisman_ai import config
 
-# Import auth utilities for creating signed headers
-import sys
-import os
-# Add api directory to path to import auth_utils
-api_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "api")
-if os.path.exists(api_path):
-    sys.path.insert(0, api_path)
-    try:
-        from auth_utils import create_auth_message, sign_message
-    except ImportError:
-        # If auth_utils not available, we'll use a fallback
-        create_auth_message = None
-        sign_message = None
+# Auth utilities for creating signed headers (defined inline, not imported from API)
+def create_auth_message(timestamp=None):
+    """Create a standardized authentication message"""
+    if timestamp is None:
+        timestamp = time.time()
+    return f"talisman-ai-auth:{int(timestamp)}"
+
+def sign_message(wallet, message):
+    """Sign a message with the wallet's hotkey"""
+    signature = wallet.hotkey.sign(message)
+    return signature.hex()
 
 class APIClient:
     """
@@ -75,7 +73,7 @@ class APIClient:
         
         # Create authentication headers if wallet is available
         headers = {}
-        if self.wallet and create_auth_message and sign_message:
+        if self.wallet:
             try:
                 timestamp = time.time()
                 message = create_auth_message(timestamp)
@@ -89,11 +87,7 @@ class APIClient:
                 bt.logging.debug(f"[APIClient] Added authentication headers for hotkey: {hotkey}")
             except Exception as e:
                 bt.logging.warning(f"[APIClient] Failed to create auth headers: {e}, proceeding without auth")
-                # No fallback - auth is required
                 headers = {}
-        else:
-            # No fallback - auth is required
-            headers = {}
         
         bt.logging.info(f"[APIClient] Submitting post {post_id} to {url} (hotkey: {hotkey})")
         

@@ -155,13 +155,14 @@ def tokens_match_within(miner: Dict[str, float], ref: Dict[str, float], abs_tol:
     return (len(diffs) == 0, diffs)
 
 def compute_validator_score(content: str, date_iso: str, likes: int, retweets: int, replies: int,
-                            account_age_days: int, followers_from_x: int, analyzer) -> float:
+                            account_age_days: int, followers_from_x: int, analyzer, analysis_result: Dict = None) -> float:
     """
     Validator score uses the same open scoring routine miners should use.
     Inputs:
       - text, date
       - public metrics (likes, retweets, replies)
       - author metrics (followers, account_age_days)
+      - analysis_result: Optional pre-computed analysis to avoid duplicate LLM calls
     """
     entry = {
         "url": "post",
@@ -177,7 +178,8 @@ def compute_validator_score(content: str, date_iso: str, likes: int, retweets: i
         },
     }
     try:
-        scored = score_tweet_entry(entry, analyzer, k=5)
+        # Pass analysis_result to avoid re-analyzing the same text
+        scored = score_tweet_entry(entry, analyzer, k=5, analysis_result=analysis_result)
         return float(scored.get("score", 0.0))
     except Exception as e:
         # We surface this upstream as an INVALID result with code=score_compute_error.
@@ -348,8 +350,21 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
 
         miner_tokens_raw = post.get("tokens") or {}
         miner_sent = float(post.get("sentiment") or 0.0)
-        ref_tokens_raw, ref_sent = analyze_text(content, analyzer)
-        miner_tokens, ref_tokens = select_tokens(miner_tokens_raw, ref_tokens_raw, k=128, eps=0.05)
+        
+        # Get analysis result once - we'll reuse it for scoring to avoid duplicate LLM calls
+        try:
+            analysis_result = analyzer.analyze_tweet_complete(content)
+        except Exception as e:
+            bt.logging.error(f"[GRADER] Analyzer error: {e}")
+            return _err("analyzer_error", f"Analyzer failed: {e}", post_id, {}, i)
+        
+        # Extract tokens and sentiment from analysis result
+        ref_tokens_raw = (analysis_result.get("subnet_relevance") or {})
+        # Keys are normalized here so later comparisons are deterministic.
+        ref_tokens_raw_normalized = {str(k).strip().lower(): float(v.get("relevance", 0.0)) for k, v in ref_tokens_raw.items()}
+        ref_sent = float(analysis_result.get("sentiment", 0.0))
+        
+        miner_tokens, ref_tokens = select_tokens(miner_tokens_raw, ref_tokens_raw_normalized, k=128, eps=0.05)
         matches, token_diffs = tokens_match_within(miner_tokens, ref_tokens, TOKEN_TOLERANCE)
         if not matches:
             # We include top mismatches to help you debug
@@ -368,8 +383,9 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
         miner_score = float(post.get("score") or 0.0)
         date_iso = iso_from_unix(live["created_at"])
         try:
+            # Pass the already-computed analysis_result to avoid re-analyzing
             v_score = compute_validator_score(content, date_iso, likes_x, rts_x, replies_x,
-                                              account_age_days, followers_x, analyzer)
+                                              account_age_days, followers_x, analyzer, analysis_result)
         except RuntimeError as e:
             return _err("score_compute_error", str(e), post_id, {}, i)
 
