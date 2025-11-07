@@ -1,6 +1,4 @@
 # Talisman AI 🪬 The Perception Subnet for On-Chain Trading Insights  
-*The perception layer for an on-chain AI trading and staking agent.*
-
 ---
 
 ## 🪬 Vision (Why this subnet exists)
