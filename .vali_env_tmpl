@@ -8,7 +8,7 @@ X_BEARER_TOKEN=
 X_API_BASE=https://api.twitter.com/2
 
 # validator
-MINER_API_URL=http://127.0.0.1:8000
+MINER_API_URL=https://talisman.rizzo.network/api
 BATCH_HTTP_TIMEOUT=30.0
-VOTE_ENDPOINT=http://127.0.0.1:8000/v1/validate_hotkeys
+VOTE_ENDPOINT=https://talisman.rizzo.network/api/v1/validate_hotkeys
 BATCH_POLL_SECONDS=10
