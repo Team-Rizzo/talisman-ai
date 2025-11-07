@@ -1,0 +1,14 @@
+# LLM Analysis
+MODEL=unsloth/Mistral-Small-24B-Instruct-2501
+API_KEY=
+LLM_BASE=https://llm.chutes.ai/v1
+
+# X/Twitter API Configuration
+X_BEARER_TOKEN=
+X_API_BASE=https://api.twitter.com/2
+
+# validator
+MINER_API_URL=http://127.0.0.1:8000
+BATCH_HTTP_TIMEOUT=30.0
+VOTE_ENDPOINT=http://127.0.0.1:8000/v1/validate_hotkeys
+BATCH_POLL_SECONDS=10

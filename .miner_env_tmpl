@@ -1,0 +1,20 @@
+MODEL=unsloth/Mistral-Small-24B-Instruct-2501
+API_KEY=
+LLM_BASE=https://llm.chutes.ai/v1
+
+X_BEARER_TOKEN=
+
+X_API_BASE=https://api.twitter.com/2
+
+MINER_API_URL=http://127.0.0.1:8000
+BATCH_HTTP_TIMEOUT=30.0
+
+MAX_POSTS=0
+
+# Scraping configuration
+# Interval between scrape cycles in seconds (300 = 5 minutes)
+SCRAPE_INTERVAL_SECONDS=300
+# Number of posts to scrape per cycle
+POSTS_PER_SCRAPE=5
+# Number of posts to submit per cycle (should be <= POSTS_PER_SCRAPE)
+POSTS_TO_SUBMIT=2
