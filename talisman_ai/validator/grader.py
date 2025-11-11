@@ -41,18 +41,15 @@ from talisman_ai.utils.normalization import norm_text
 #      - validator computes its own score using the same algorithm
 #      - your score may be <= validator_score + 0.05; larger -> error
 #
-# Final score (only if ALL posts pass):
-#   - average of your post scores
-#   - multiplied by a quantity modifier:
-#       1–5 posts: 1.00x
-#       6–20 posts: 0.95x
-#       21+ posts: 0.90x
+# Scoring:
+#   - The validator validates sampled posts to determine VALID/INVALID
+#   - If VALID, the validator uses avg_score_all_posts (API-calculated average of ALL posts)
+#   - This grader only validates posts; it does not calculate final scores
 #
 # Return shape:
 #   - If a post fails: (CONSENSUS_INVALID, { "error": {...}, "final_score": 0.0 })
 #     Error includes code, message, failing post_index and post_id, plus details.
-#   - If all pass: (CONSENSUS_VALID, { n_posts, avg_post_score, quantity_modifier,
-#                                     final_score, tolerances, analyzer })
+#   - If all pass: (CONSENSUS_VALID, { n_posts, tolerances, analyzer })
 # Keep reading comments inline to see exactly how each check works.
 # =============================================================================
 
@@ -331,7 +328,6 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
     except Exception as e:
         return _err("x_api_unavailable", str(e))
 
-    miner_scores: List[float] = []
     for i, post in enumerate(posts):
         post_id = post.get("post_id")
         if not post_id:
@@ -393,14 +389,12 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
             return _err("score_inflation", "miner score exceeds validator tolerance", post_id,
                         {"miner_score": miner_score, "validator_score": v_score, "allowed_over": SCORE_TOLERANCE}, i)
 
-        # If we get here, this post passed all checks; keep your submitted score.
-        miner_scores.append(miner_score)
+        # If we get here, this post passed all validation checks
 
-    # --- Final scoring across the batch ---
+    # All posts passed validation
+    # Note: We don't calculate final_score here because the validator uses
+    # avg_score_all_posts (API-calculated average of ALL posts) instead.
     n = len(posts)
-    quantity_modifier = 1.0 if n <= 5 else (0.95 if n <= 20 else 0.90)
-    avg_score = sum(miner_scores) / len(miner_scores) if miner_scores else 0.0
-    final_score = avg_score * quantity_modifier
 
     analyzer_version = "unknown"
     if analyzer and hasattr(analyzer, "model"):
@@ -408,9 +402,6 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
 
     return CONSENSUS_VALID, {
         "n_posts": n,
-        "avg_post_score": avg_score,
-        "quantity_modifier": quantity_modifier,
-        "final_score": final_score,
         "tolerances": {
             "token": TOKEN_TOLERANCE,
             "sentiment": SENTIMENT_TOLERANCE,

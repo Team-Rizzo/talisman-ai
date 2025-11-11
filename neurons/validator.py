@@ -160,16 +160,31 @@ class Validator(BaseValidatorNeuron):
         for idx, miner_entry in enumerate(batch):
             hotkey = miner_entry.get("hotkey")
             posts = miner_entry.get("posts", []) # API selected sample of posts to grade
+            avg_score_all_posts = miner_entry.get("avg_score_all_posts") # API-calculated average of ALL posts
 
             bt.logging.info(f"[BATCH] [{idx+1}/{len(batch)}] Processing hotkey={hotkey} with {len(posts)} post(s)")
             bt.logging.debug(f"[BATCH] Posts for {hotkey}: {[p.get('post_id', 'N/A') for p in posts]}")
+            if avg_score_all_posts is not None:
+                bt.logging.info(f"[BATCH] API-provided avg_score_all_posts for {hotkey}: {avg_score_all_posts:.3f}")
             
             bt.logging.info(f"[BATCH] Grading hotkey {hotkey}...")
             label, grade_result = grade_hotkey(posts)
-            bt.logging.debug(f"[BATCH] Grade result for {hotkey}: {grade_result}")
+            # The grader validates sampled posts to determine VALID/INVALID.
+            # We use avg_score_all_posts (API-calculated average of ALL posts) for scoring.
             
-            # Extract final_score from grading (0.0 to 1.0)
-            final_score = grade_result.get("final_score", 0.0)
+            # Use API-provided average score if batch is VALID, otherwise use 0.0
+            # The validator still validates sampled posts to determine VALID/INVALID
+            if label == CONSENSUS_VALID and avg_score_all_posts is not None:
+                # Use the API-calculated average score of ALL posts (not just sampled)
+                final_score = float(avg_score_all_posts)
+                bt.logging.info(f"[BATCH] Using API-provided avg_score_all_posts={final_score:.3f} for {hotkey} (batch is VALID)")
+            else:
+                # If batch is INVALID or no avg_score_all_posts provided, use 0.0
+                final_score = 0.0
+                if label == CONSENSUS_VALID:
+                    bt.logging.warning(f"[BATCH] Batch is VALID but no avg_score_all_posts provided for {hotkey}, using 0.0")
+                else:
+                    bt.logging.info(f"[BATCH] Batch is INVALID for {hotkey}, final_score=0.0")
             
             # Extract failure reason if batch failed
             failure_reason = None
