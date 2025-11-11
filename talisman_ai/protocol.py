@@ -24,12 +24,13 @@ class Batchscore(bt.Synapse):
     """
     Synapse for sending batch scores from validator to miner.
     
-    The validator sends this synapse to inform miners of their calculated score
-    for a specific batch. The miner receives the batch_id and avg_score (the score
-    the validator calculated during grading).
+    The validator sends this synapse to inform miners of their score for a specific batch.
+    The miner receives the batch_id and avg_score (API-calculated average of ALL posts).
+    For VALID batches, this is the avg_score_all_posts.
+    For INVALID batches, this is 0.0.
     """
     # Input set by validator - batch identifier
     batch_id: str
 
-    # Input set by validator - the average score calculated by the validator for this miner's batch
+    # Input set by validator - API-calculated average score of ALL posts (or 0.0 if INVALID)
     avg_score: Optional[float] = None

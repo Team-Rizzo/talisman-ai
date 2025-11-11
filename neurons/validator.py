@@ -284,10 +284,12 @@ class Validator(BaseValidatorNeuron):
 
     async def _send_scores_to_miners(self, batch_id: str, timeout: float = 8.0):
         """
-        Send calculated scores back to miners via Batchscore synapse.
+        Send scores back to miners via Batchscore synapse.
         
         For each miner that was graded in the batch, sends a Batchscore synapse
-        with the batch_id and the avg_score (final_score) that the validator calculated.
+        with the batch_id and avg_score (API-calculated average of ALL posts).
+        For VALID batches, sends the API-provided avg_score_all_posts.
+        For INVALID batches, sends 0.0.
         
         Args:
             batch_id: Batch identifier
@@ -320,7 +322,7 @@ class Validator(BaseValidatorNeuron):
         async def send_score_to_miner(hotkey, axon, score):
             """Send a Batchscore synapse to a single miner"""
             syn = protocol.Batchscore(batch_id=batch_id)
-            syn.avg_score = score  # Set the score the validator calculated
+            syn.avg_score = score  # API-calculated average of ALL posts (or 0.0 if INVALID)
             try:
                 response = await self.dendrite(
                     axons=[axon],
