@@ -51,6 +51,7 @@ class PostClassification:
         return f"{self.subnet_id}|{self.content_type.value}|{self.sentiment.value}|{self.technical_quality.value}|{self.market_analysis.value}|{self.impact_potential.value}|{self.relevance_confidence}|{sorted_evidence}|{sorted_anchors}"
     
     def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization or database storage"""
         return {
             "subnet_id": self.subnet_id,
             "subnet_name": self.subnet_name,
@@ -63,6 +64,18 @@ class PostClassification:
             "evidence_spans": self.evidence_spans,
             "anchors_detected": self.anchors_detected,
         }
+    
+    def get_tokens_dict(self) -> dict:
+        """
+        Get subnet tokens dict for grader compatibility.
+        
+        Returns dict mapping subnet_name -> relevance score:
+        - relevance=1.0 if this classification matched a subnet
+        - relevance=0.0 if no match (subnet_id=0)
+        """
+        if self.subnet_id == 0:
+            return {}  # No subnet matched
+        return {self.subnet_name: 1.0}  # Binary: matched or not
 
 
 # Tool schema for function calling
@@ -197,12 +210,21 @@ class SubnetRelevanceAnalyzer:
         self.subnets[subnet_id] = subnet_data
         bt.logging.debug(f"[ANALYZER] Registered subnet {subnet_id}: {subnet_data.get('name')}")
     
-    def _build_structured_subnet_rows(self) -> str:
-        """Build structured subnet rows for exact-match lookup"""
+    def _build_structured_subnet_rows(self, candidate_ids: set = None) -> str:
+        """
+        Build structured subnet rows for exact-match lookup
+        
+        Args:
+            candidate_ids: Optional set of subnet IDs to include. If None, includes all subnets.
+        """
         rows = []
-        for sid in sorted(self.subnets.keys()):
+        subnet_ids = candidate_ids if candidate_ids is not None else set(self.subnets.keys())
+        
+        for sid in sorted(subnet_ids):
             if sid == 0:
                 continue  # Skip NONE for the main list
+            if sid not in self.subnets:
+                continue
             s = self.subnets[sid]
             
             # Extract structured fields
@@ -230,8 +252,44 @@ class SubnetRelevanceAnalyzer:
             PostClassification if successful, None if parsing fails
         """
         
-        # Build structured subnet rows
-        subnet_rows = self._build_structured_subnet_rows()
+        # PRE-FILTER: Deterministically narrow down to candidate subnets (no LLM)
+        # This reduces prompt size from ~28K to ~5-8K tokens (70%+ savings)
+        text_lower = text.lower()
+        candidate_subnet_ids = set()
+        
+        for subnet_id, subnet_data in self.subnets.items():
+            if subnet_id == 0:  # Always include NONE option
+                candidate_subnet_ids.add(subnet_id)
+                continue
+            
+            # Check 1: Direct SN pattern match (SN13, SN20, etc)
+            if f"sn{subnet_id}" in text_lower or f"sn {subnet_id}" in text_lower or f"subnet {subnet_id}" in text_lower:
+                candidate_subnet_ids.add(subnet_id)
+                continue
+            
+            # Check 2: Unique identifier match
+            for identifier in subnet_data.get('unique_identifiers', []):
+                if identifier.lower() in text_lower:
+                    candidate_subnet_ids.add(subnet_id)
+                    break
+            
+            # Check 3: Subnet name appears near BitTensor anchor words
+            subnet_name = subnet_data.get('name', '').lower()
+            if subnet_name and len(subnet_name) > 3:
+                if subnet_name in text_lower:
+                    # Check if there's a BitTensor anchor nearby
+                    anchors = ['bittensor', 'subnet', 'validator', 'tao', 'emissions', 'miner']
+                    if any(anchor in text_lower for anchor in anchors):
+                        candidate_subnet_ids.add(subnet_id)
+        
+        # If no candidates found, only include NONE (subnet_id=0)
+        if len(candidate_subnet_ids) == 1 and 0 in candidate_subnet_ids:
+            bt.logging.debug(f"[ANALYZER] Pre-filter: no candidates found, using NONE only")
+        else:
+            bt.logging.debug(f"[ANALYZER] Pre-filter: {len(self.subnets)} subnets → {len(candidate_subnet_ids)} candidates")
+        
+        # Build subnet rows ONLY for candidates (massive token savings)
+        subnet_rows = self._build_structured_subnet_rows(candidate_subnet_ids)
         
         system_prompt = """You are a deterministic BitTensor post classifier.
 You MUST respond exactly once by calling classify_bittensor_post.
@@ -318,70 +376,72 @@ Now classify the provided post. Return exact substrings that triggered your deci
     
     def analyze_tweet_complete(self, text: str) -> dict:
         """
-        Backward compatibility wrapper for classify_post()
+        Analyze post and return rich classification data (NOT lossy conversions)
         
-        This method provides compatibility with the original SubnetRelevanceAnalyzer API.
-        It runs classification on a post and returns results in a format compatible
-        with the old analyze_tweet_complete() method.
+        Returns the full PostClassification object with all categorical enums intact.
+        This preserves data quality for database storage and downstream processing.
         
         Args:
             text: Post text to analyze
             
         Returns:
-            Dict with classification results in legacy format
+            Dict with:
+                - classification: Full PostClassification object (or None if failed)
+                - subnet_relevance: Dict mapping subnet_name -> classification dict
+                - timestamp: ISO timestamp
         """
         start_time = time.time()
         bt.logging.info(f"[ANALYZER] Starting analysis for post (length: {len(text)} chars)")
-        bt.logging.info(f"[ANALYZER] Total registered subnets: {len(self.subnet_registry)}")
         
-        # Run new classification
+        # Run classification
         classification = self.classify_post(text)
         
         if classification is None:
-            bt.logging.warning(f"[ANALYZER] Classification failed, returning empty result")
+            bt.logging.warning(f"[ANALYZER] Classification failed")
             return {
-                "text": text[:100] + "..." if len(text) > 100 else text,
+                "classification": None,
                 "subnet_relevance": {},
-                "sentiment": 0.0,
-                "sentiment_reasoning": "Classification failed",
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Convert to legacy format
+        # Build subnet_relevance dict with FULL classification data (no lossy conversions)
         subnet_relevance = {}
         if classification.subnet_id != 0:
             subnet_name = classification.subnet_name
-            # Map to legacy relevance score format
-            confidence_map = {"high": 0.9, "medium": 0.6, "low": 0.3}
-            relevance = confidence_map.get(classification.relevance_confidence, 0.6)
-            
             subnet_relevance[subnet_name] = {
-                "relevance": relevance,
-                "confidence": classification.relevance_confidence,
-                "matched_signals": classification.evidence_spans,
-                "method": "deterministic_classification"
+                "subnet_id": classification.subnet_id,
+                "subnet_name": subnet_name,
+                "relevance": 1.0,  # Binary: matched (1.0) or not matched (0.0) - grader compatibility
+                "relevance_confidence": classification.relevance_confidence,  # Keep as "high"/"medium"/"low"
+                "content_type": classification.content_type.value,
+                "sentiment": classification.sentiment.value,  # Keep as enum string
+                "technical_quality": classification.technical_quality.value,
+                "market_analysis": classification.market_analysis.value,
+                "impact_potential": classification.impact_potential.value,
+                "evidence_spans": classification.evidence_spans,
+                "anchors_detected": classification.anchors_detected,
             }
         
-        # Map sentiment enum to numeric
-        sentiment_map = {
+        total_time = time.time() - start_time
+        bt.logging.info(f"[ANALYZER] Analysis completed in {total_time:.2f}s")
+        
+        # Map sentiment enum to float for grader compatibility (while keeping enum available)
+        sentiment_to_float = {
             "very_bullish": 1.0,
             "bullish": 0.5,
             "neutral": 0.0,
             "bearish": -0.5,
             "very_bearish": -1.0
         }
-        sentiment = sentiment_map.get(classification.sentiment.value, 0.0)
-        
-        total_time = time.time() - start_time
-        bt.logging.info(f"[ANALYZER] Total analysis completed in {total_time:.2f}s")
+        sentiment_enum = classification.sentiment.value if classification else "neutral"
+        sentiment_float = sentiment_to_float.get(sentiment_enum, 0.0)
         
         return {
-            "text": text[:100] + "..." if len(text) > 100 else text,
-            "subnet_relevance": subnet_relevance,
-            "sentiment": sentiment,
-            "sentiment_reasoning": f"{classification.content_type.value}, {classification.technical_quality.value} quality",
-            "timestamp": datetime.now().isoformat(),
-            "classification": classification  # Include full classification for new code
+            "classification": classification,  # Full PostClassification object
+            "subnet_relevance": subnet_relevance,  # Rich dict ready for DB storage
+            "sentiment": sentiment_float,  # Float for grader compatibility
+            "sentiment_enum": sentiment_enum,  # Enum string for new code
+            "timestamp": datetime.now().isoformat()
         }
     
     def _parse_classification(self, args: dict) -> Optional[PostClassification]:
