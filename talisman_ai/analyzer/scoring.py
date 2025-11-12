@@ -301,49 +301,64 @@ def compute_post_score(
 
 # ===== Backward Compatibility Functions for Legacy Code =====
 
-def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_result: Dict = None) -> Tuple[float, List[Tuple[str, float]]]:
+def get_tokens_from_analysis(analysis_result: Dict) -> Dict[str, float]:
     """
-    Compute subnet relevance scores using the analyzer and return top-k results.
+    Extract tokens dict from analysis result for grader compatibility.
     
-    This function uses the SubnetRelevanceAnalyzer to determine how relevant a post
-    is to different BitTensor subnets, then returns the mean relevance score of the
-    top-k most relevant subnets.
+    Returns dict mapping subnet_name -> 1.0 (binary: matched or not).
+    This maintains API compatibility while using the new classification system.
+    
+    Args:
+        analysis_result: Result from analyzer.analyze_tweet_complete()
+        
+    Returns:
+        Dict mapping subnet_name to 1.0 if matched, empty dict if no match
+    """
+    classification = analysis_result.get("classification")
+    if classification is None:
+        return {}
+    return classification.get_tokens_dict()
+
+
+def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_result: Dict = None) -> Tuple[float, List[Tuple[str, Dict]]]:
+    """
+    Get classification from analyzer and return subnet relevance data.
     
     Args:
         text: The post text to analyze (only used if analysis_result is None)
         analyzer: SubnetRelevanceAnalyzer instance configured with subnet registry
-        k: Number of top subnets to consider when computing the mean (default: 5)
+        k: Number of top subnets to consider (default: 5)
         analysis_result: Optional pre-computed analysis result dict. If provided,
                         this will be used instead of calling analyze_tweet_complete again.
         
     Returns:
         Tuple of:
-            - mean_top: Mean relevance score of top-k subnets [0.0, 1.0]
-            - top: List of (subnet_name, relevance_score) tuples for top-k subnets,
-                   sorted by relevance (highest first)
+            - relevance: Binary relevance (1.0 if matched a subnet, 0.0 otherwise)
+            - top: List of (subnet_name, classification_dict) tuples with full data
     """
     if analysis_result is None:
         out = analyzer.analyze_tweet_complete(text)
     else:
         out = analysis_result
-    items = [(name, data.get("relevance", 0.0)) for name, data in out.get("subnet_relevance", {}).items()]
-    items.sort(key=lambda x: x[1], reverse=True)
-    top = items[:k]
-    mean_top = float(sum(s for _, s in top) / len(top)) if top else 0.0
-    return mean_top, top
+    
+    # Get classification object
+    classification = out.get("classification")
+    if classification is None or classification.subnet_id == 0:
+        return 0.0, []  # No match = 0.0 relevance
+    
+    # Return full classification data (not lossy floats)
+    subnet_name = classification.subnet_name
+    classification_data = out.get("subnet_relevance", {}).get(subnet_name, {})
+    
+    return 1.0, [(subnet_name, classification_data)]  # Binary: matched or not
 
 
 def score_tweet_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict = None) -> Dict:
     """
-    Score a single tweet/post entry using LLM-based subnet relevance analysis.
+    Score a single tweet/post entry with rich classification data preserved.
     
-    This is the primary scoring function for production use. It computes three
-    component scores (relevance, value, recency) and combines them into a final
-    score using the default weights defined above.
-    
-    The relevance component uses an LLM-based analyzer to determine how relevant
-    the post is to BitTensor subnets, providing more accurate results than
-    simple keyword matching.
+    Returns both the final score AND the full classification object, so downstream
+    consumers can use the rich categorical data for database storage, analytics, etc.
     
     Args:
         entry: Dictionary containing tweet entry with keys:
@@ -357,24 +372,31 @@ def score_tweet_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict =
                 - reply_count: Number of replies (optional, defaults to 0)
                 - author_followers: Author's follower count (optional, defaults to 0)
                 - account_age_days: Author's account age in days (optional, defaults to 0)
-        analyzer: SubnetRelevanceAnalyzer instance configured with subnet registry
-        k: Number of top subnets to consider when computing relevance (default: 5)
-        analysis_result: Optional pre-computed analysis result dict. If provided,
-                        this will be used instead of calling analyze_tweet_complete again.
+        analyzer: SubnetRelevanceAnalyzer instance
+        k: Kept for API compatibility (not used anymore - we return 1 subnet or none)
+        analysis_result: Optional pre-computed analysis result dict
         
     Returns:
         Dictionary containing:
             - url: Original tweet URL/identifier
-            - top_subnets: List of (subnet_name, relevance_score) tuples for top-k subnets
-            - relevance: Mean relevance score of top-k subnets [0.0, 1.0]
-            - value: Value score based on engagement and author credibility [0.0, 1.0]
+            - classification: Full PostClassification object (or None)
+            - subnet_data: Full classification dict for the matched subnet
+            - relevance: Binary relevance (1.0 if matched, 0.0 if not)
+            - value: Value score based on engagement [0.0, 1.0]
             - recency: Recency score based on tweet age [0.0, 1.0]
-            - score: Final weighted score combining all components [0.0, 1.0]
+            - score: Final weighted score [0.0, 1.0]
     """
     info = entry["tweet_info"]
 
-    # Compute component scores
-    rel_mean, rel_top = top_k_relevance_from_analyzer(info["tweet_text"], analyzer, k=k, analysis_result=analysis_result)
+    # Get classification with full rich data
+    rel, subnet_data = top_k_relevance_from_analyzer(info["tweet_text"], analyzer, k=k, analysis_result=analysis_result)
+    
+    # Get the full classification object if available
+    if analysis_result is None:
+        analysis_result = analyzer.analyze_tweet_complete(info["tweet_text"])
+    classification = analysis_result.get("classification")
+    
+    # Compute engagement scores
     val = value_score(
         like_count=info.get("like_count", 0) or 0,
         retweet_count=info.get("retweet_count", 0) or 0,
@@ -386,12 +408,13 @@ def score_tweet_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict =
     rec = recency_score(info["tweet_date"])
 
     # Combine components using default weights
-    final = RELEVANCE_WEIGHT * rel_mean + VALUE_WEIGHT * val + RECENCY_WEIGHT * rec
+    final = RELEVANCE_WEIGHT * rel + VALUE_WEIGHT * val + RECENCY_WEIGHT * rec
 
     return {
         "url": entry.get("url", ""),
-        "top_subnets": rel_top,
-        "relevance": rel_mean,
+        "classification": classification,  # Full PostClassification object
+        "subnet_data": subnet_data[0] if subnet_data else None,  # Full classification dict
+        "relevance": rel,  # Binary: 1.0 or 0.0
         "value": val,
         "recency": rec,
         "score": max(0.0, min(1.0, float(final)))
