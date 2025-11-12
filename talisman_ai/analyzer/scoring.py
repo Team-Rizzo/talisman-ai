@@ -246,9 +246,10 @@ def _build_canonical_from_dict(classification: Dict) -> str:
     return f"{subnet_id}|{content_type}|{sentiment}|{technical_quality}|{market_analysis}|{impact_potential}|{relevance_confidence}|{sorted_evidence}|{sorted_anchors}"
 
 
-# ===== Scoring Weights (for future use) =====
-# These can be used if you want to compute final post scores based on classification + engagement
-RELEVANCE_WEIGHT = 0.50  # 50% weight on subnet relevance (binary: subnet_id != 0)
+# ===== Scoring Weights =====
+# Default weights for production scoring (used by score_tweet_entry)
+# These weights prioritize relevance over value, with recency as a minor factor
+RELEVANCE_WEIGHT = 0.50  # 50% weight on subnet relevance
 VALUE_WEIGHT = 0.40      # 40% weight on signal value/quality
 RECENCY_WEIGHT = 0.10    # 10% weight on recency
 
@@ -296,4 +297,103 @@ def compute_post_score(
     final = weights["relevance"] * relevance + weights["value"] * val + weights["recency"] * rec
     
     return _clamp01(final)
+
+
+# ===== Backward Compatibility Functions for Legacy Code =====
+
+def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_result: Dict = None) -> Tuple[float, List[Tuple[str, float]]]:
+    """
+    Compute subnet relevance scores using the analyzer and return top-k results.
+    
+    This function uses the SubnetRelevanceAnalyzer to determine how relevant a post
+    is to different BitTensor subnets, then returns the mean relevance score of the
+    top-k most relevant subnets.
+    
+    Args:
+        text: The post text to analyze (only used if analysis_result is None)
+        analyzer: SubnetRelevanceAnalyzer instance configured with subnet registry
+        k: Number of top subnets to consider when computing the mean (default: 5)
+        analysis_result: Optional pre-computed analysis result dict. If provided,
+                        this will be used instead of calling analyze_tweet_complete again.
+        
+    Returns:
+        Tuple of:
+            - mean_top: Mean relevance score of top-k subnets [0.0, 1.0]
+            - top: List of (subnet_name, relevance_score) tuples for top-k subnets,
+                   sorted by relevance (highest first)
+    """
+    if analysis_result is None:
+        out = analyzer.analyze_tweet_complete(text)
+    else:
+        out = analysis_result
+    items = [(name, data.get("relevance", 0.0)) for name, data in out.get("subnet_relevance", {}).items()]
+    items.sort(key=lambda x: x[1], reverse=True)
+    top = items[:k]
+    mean_top = float(sum(s for _, s in top) / len(top)) if top else 0.0
+    return mean_top, top
+
+
+def score_tweet_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict = None) -> Dict:
+    """
+    Score a single tweet/post entry using LLM-based subnet relevance analysis.
+    
+    This is the primary scoring function for production use. It computes three
+    component scores (relevance, value, recency) and combines them into a final
+    score using the default weights defined above.
+    
+    The relevance component uses an LLM-based analyzer to determine how relevant
+    the post is to BitTensor subnets, providing more accurate results than
+    simple keyword matching.
+    
+    Args:
+        entry: Dictionary containing tweet entry with keys:
+            - url: Tweet URL or identifier
+            - tweet_info: Dictionary with tweet metadata containing:
+                - tweet_text: The tweet text content
+                - tweet_date: ISO format date string
+                - like_count: Number of likes (optional, defaults to 0)
+                - retweet_count: Number of retweets (optional, defaults to 0)
+                - quote_count: Number of quote tweets (optional, defaults to 0)
+                - reply_count: Number of replies (optional, defaults to 0)
+                - author_followers: Author's follower count (optional, defaults to 0)
+                - account_age_days: Author's account age in days (optional, defaults to 0)
+        analyzer: SubnetRelevanceAnalyzer instance configured with subnet registry
+        k: Number of top subnets to consider when computing relevance (default: 5)
+        analysis_result: Optional pre-computed analysis result dict. If provided,
+                        this will be used instead of calling analyze_tweet_complete again.
+        
+    Returns:
+        Dictionary containing:
+            - url: Original tweet URL/identifier
+            - top_subnets: List of (subnet_name, relevance_score) tuples for top-k subnets
+            - relevance: Mean relevance score of top-k subnets [0.0, 1.0]
+            - value: Value score based on engagement and author credibility [0.0, 1.0]
+            - recency: Recency score based on tweet age [0.0, 1.0]
+            - score: Final weighted score combining all components [0.0, 1.0]
+    """
+    info = entry["tweet_info"]
+
+    # Compute component scores
+    rel_mean, rel_top = top_k_relevance_from_analyzer(info["tweet_text"], analyzer, k=k, analysis_result=analysis_result)
+    val = value_score(
+        like_count=info.get("like_count", 0) or 0,
+        retweet_count=info.get("retweet_count", 0) or 0,
+        quote_count=info.get("quote_count", 0) or 0,
+        reply_count=info.get("reply_count", 0) or 0,
+        author_followers=info.get("author_followers", 0) or 0,
+        account_age_days=info.get("account_age_days", 0) or 0,
+    )
+    rec = recency_score(info["tweet_date"])
+
+    # Combine components using default weights
+    final = RELEVANCE_WEIGHT * rel_mean + VALUE_WEIGHT * val + RECENCY_WEIGHT * rec
+
+    return {
+        "url": entry.get("url", ""),
+        "top_subnets": rel_top,
+        "relevance": rel_mean,
+        "value": val,
+        "recency": rec,
+        "score": max(0.0, min(1.0, float(final)))
+    }
 
