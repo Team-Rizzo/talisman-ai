@@ -1,21 +1,161 @@
+"""
+Deterministic X Post Classification for BitTensor Subnet Relevance
+
+Uses structured function calling with categorical enums to achieve deterministic
+LLM evaluation. Validators can verify miner classifications via exact matching
+of canonical strings.
+
+Key Features:
+- Hierarchical trigger rules (SN mention > alias > name+anchor > NONE)
+- Explicit abstain logic (subnet_id=0 for ties/unknown)
+- Evidence extraction (exact spans + anchors for auditability)
+- Fixed rubrics for each enum (not vibes-based assessment)
+"""
+
 from openai import OpenAI
 import json
-from typing import Dict, List
-from datetime import datetime
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 import time
-import bittensor as bt  # Add this import for logging
+from datetime import datetime
+import bittensor as bt
+
+from classifications import ContentType, Sentiment, TechnicalQuality, MarketAnalysis, ImpactPotential
 
 # Import centralized config (loads .miner_env and .vali_env)
-from talisman_ai import config
+try:
+    from talisman_ai import config
+except ImportError:
+    config = None
+
+
+@dataclass
+class PostClassification:
+    """Canonical classification result"""
+    subnet_id: int
+    subnet_name: str
+    content_type: ContentType
+    sentiment: Sentiment
+    technical_quality: TechnicalQuality
+    market_analysis: MarketAnalysis
+    impact_potential: ImpactPotential
+    relevance_confidence: str  # "high", "medium", "low"
+    evidence_spans: List[str]  # Exact substrings that triggered the decision
+    anchors_detected: List[str]  # BitTensor anchor words found
+    
+    def to_canonical_string(self) -> str:
+        """Deterministic string for exact matching by validators"""
+        # Sort evidence for determinism
+        sorted_evidence = "|".join(sorted([s.lower() for s in self.evidence_spans]))
+        sorted_anchors = "|".join(sorted([s.lower() for s in self.anchors_detected]))
+        return f"{self.subnet_id}|{self.content_type.value}|{self.sentiment.value}|{self.technical_quality.value}|{self.market_analysis.value}|{self.impact_potential.value}|{self.relevance_confidence}|{sorted_evidence}|{sorted_anchors}"
+    
+    def to_dict(self) -> dict:
+        return {
+            "subnet_id": self.subnet_id,
+            "subnet_name": self.subnet_name,
+            "content_type": self.content_type.value,
+            "sentiment": self.sentiment.value,
+            "technical_quality": self.technical_quality.value,
+            "market_analysis": self.market_analysis.value,
+            "impact_potential": self.impact_potential.value,
+            "relevance_confidence": self.relevance_confidence,
+            "evidence_spans": self.evidence_spans,
+            "anchors_detected": self.anchors_detected,
+        }
+
+
+# Tool schema for function calling
+CLASSIFICATION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "classify_bittensor_post",
+        "description": "Classify a BitTensor subnet-related X post across multiple dimensions",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "subnet_id": {
+                    "type": "integer",
+                    "description": "Primary subnet this tweet is about (0 for NONE/UNKNOWN)"
+                },
+                "content_type": {
+                    "type": "string",
+                    "enum": [ct.value for ct in ContentType],
+                    "description": "Primary type of content in the tweet"
+                },
+                "sentiment": {
+                    "type": "string",
+                    "enum": [s.value for s in Sentiment],
+                    "description": "Overall market sentiment tone"
+                },
+                "technical_quality": {
+                    "type": "string",
+                    "enum": [tq.value for tq in TechnicalQuality],
+                    "description": "Quality/clarity of technical information"
+                },
+                "market_analysis": {
+                    "type": "string",
+                    "enum": [ma.value for ma in MarketAnalysis],
+                    "description": "Type of market analysis if applicable"
+                },
+                "impact_potential": {
+                    "type": "string",
+                    "enum": [ip.value for ip in ImpactPotential],
+                    "description": "Expected community/ecosystem impact"
+                },
+                "relevance_confidence": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                    "description": "Confidence in subnet match"
+                },
+                "evidence_spans": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact substrings from post that triggered the subnet match"
+                },
+                "anchors_detected": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "BitTensor anchor words found in post"
+                }
+            },
+            "required": ["subnet_id", "content_type", "sentiment", "technical_quality", 
+                        "market_analysis", "impact_potential", "relevance_confidence", 
+                        "evidence_spans", "anchors_detected"]
+        }
+    }
+}
+
 
 class SubnetRelevanceAnalyzer:
-    def __init__(self, model: str = None, api_key: str = None, llm_base: str = None):
-        self.subnet_registry = {}  # Initialize registry first
+    """
+    Deterministic X post classifier using structured function calling with categorical enums
+    
+    Backward compatible with original SubnetRelevanceAnalyzer while adding new deterministic
+    classification capabilities.
+    """
+    
+    def __init__(self, model: str = None, api_key: str = None, llm_base: str = None, subnets: List[Dict] = None):
+        """
+        Initialize analyzer with subnet registry and LLM config
+        
+        Args:
+            model: LLM model identifier (optional, uses config.MODEL if not provided)
+            api_key: API key for LLM service (optional, uses config.API_KEY if not provided)
+            llm_base: Base URL for LLM service (optional, uses config.LLM_BASE if not provided)
+            subnets: List of subnet dictionaries (optional, can be added via register_subnet)
+        """
+        self.subnet_registry = {}  # For backward compatibility with register_subnet()
         
         # Use provided values or fall back to centralized config
-        self.model = model or config.MODEL
-        self.api_key = api_key or config.API_KEY
-        self.llm_base = llm_base or config.LLM_BASE
+        if config:
+            self.model = model or config.MODEL
+            self.api_key = api_key or config.API_KEY
+            self.llm_base = llm_base or config.LLM_BASE
+        else:
+            self.model = model
+            self.api_key = api_key
+            self.llm_base = llm_base
         
         # Validate API_KEY is set
         if not self.api_key:
@@ -25,265 +165,255 @@ class SubnetRelevanceAnalyzer:
             )
         
         self.client = OpenAI(base_url=self.llm_base, api_key=self.api_key)
+        
+        # Initialize subnets dict for new classification system
+        if subnets:
+            self.subnets = {s["id"]: s for s in subnets}
+            for s in subnets:
+                self.subnet_registry[s["id"]] = s
+        else:
+            self.subnets = {}
+        
+        # Add NONE subnet for abstain logic
+        self.subnets[0] = {
+            "id": 0, 
+            "name": "NONE_OF_THE_ABOVE", 
+            "description": "General BitTensor content not specific to a listed subnet"
+        }
+        
         bt.logging.info(f"[ANALYZER] Initialized with model: {self.model}")
+        if subnets:
+            bt.logging.info(f"[ANALYZER] Registered {len(self.subnets)-1} subnets (+1 NONE)")
     
     def register_subnet(self, subnet_data: dict):
-        """Register a subnet with its metadata"""
+        """
+        Register a subnet with its metadata (backward compatibility method)
+        
+        Args:
+            subnet_data: Dict with subnet info including 'id', 'name', etc.
+        """
         subnet_id = subnet_data['id']
         self.subnet_registry[subnet_id] = subnet_data
+        self.subnets[subnet_id] = subnet_data
         bt.logging.debug(f"[ANALYZER] Registered subnet {subnet_id}: {subnet_data.get('name')}")
     
+    def _build_structured_subnet_rows(self) -> str:
+        """Build structured subnet rows for exact-match lookup"""
+        rows = []
+        for sid in sorted(self.subnets.keys()):
+            if sid == 0:
+                continue  # Skip NONE for the main list
+            s = self.subnets[sid]
+            
+            # Extract structured fields
+            aliases = s.get("unique_identifiers", [])
+            if s.get("name"):
+                aliases.append(s["name"])
+            
+            # Get keywords from description
+            desc_words = s.get("description", "").split()[:10]
+            keywords = [w.strip(".,;:") for w in desc_words if len(w) > 4][:5]
+            
+            row = f"ID: {sid:2d} | Name: {s.get('name', 'Unknown'):20s} | Aliases: {aliases[:4]} | Keywords: {keywords[:4]}"
+            rows.append(row)
+        
+        return "\n".join(rows)
+    
+    def classify_post(self, text: str) -> Optional[PostClassification]:
+        """
+        Classify an X post using structured function calling with hierarchical rules
+        
+        Args:
+            text: X post text to classify
+            
+        Returns:
+            PostClassification if successful, None if parsing fails
+        """
+        
+        # Build structured subnet rows
+        subnet_rows = self._build_structured_subnet_rows()
+        
+        system_prompt = """You are a deterministic BitTensor post classifier.
+You MUST respond exactly once by calling classify_bittensor_post.
+Never write free text. Output only the function call.
+
+DECISION RULES (apply in order; earlier rules override later ones):
+
+[Subnet Selection Triggers - HIERARCHICAL]
+1) If post contains exact SN pattern (SN<number>) present in AVAILABLE_SUBNETS → choose that subnet_id
+2) Else if post contains exact alias/handle/org from AVAILABLE_SUBNETS → choose that subnet_id
+3) Else if post contains subnet NAME within 50 chars of anchor word (bittensor, subnet, validator, TAO, emissions, miner) → choose that subnet_id
+4) Else → subnet_id=0 (NONE/UNKNOWN - do not guess)
+
+TIES: If two or more subnets satisfy the highest-priority trigger → subnet_id=0
+
+HOMONYM RULE: If token matches non-BitTensor meaning (e.g. Omron PLC) and post lacks BitTensor anchors → subnet_id=0
+
+[Enum Rules]
+- sentiment: very_bullish (🚀, moon, ATH, pump), bullish (positive price/growth), neutral (default), bearish (concerns, dump), very_bearish (crash, exploit, failure)
+- technical_quality: high (≥2 specifics: APIs, versions, repos, endpoints, metrics), medium (1 specific), low (claims without specifics), none (no technical content)
+- content_type: prefer most specific (announcement > milestone > partnership > technical_insight > tutorial > security > governance > market_discussion > community/hype/opinion > other)
+- market_analysis: technical (indicators, order flow), economic (fundamentals, costs), political (regulatory/governance), social (narrative/virality), other
+- impact_potential: HIGH (major release/mainnet/security incident/governance passed), MEDIUM (notable update/launch), LOW (minor info), NONE (chatty/irrelevant)
+
+[Confidence]
+- high: direct SN/alias/handle mention
+- medium: name+anchor rule (trigger 3)
+- low: weak hints (prefer subnet_id=0)
+
+[Evidence]
+- evidence_spans: exact substrings that triggered match (e.g. "SN13", "@omron_subnet", "x402 API")
+- anchors_detected: BitTensor anchor words found (e.g. "bittensor", "subnet", "validator", "TAO")"""
+
+        # Few-shot examples
+        few_shot_examples = """
+EXAMPLE A — Direct SN mention → high confidence:
+Post: "SN13 just launched x402 API for social data."
+Call: {"subnet_id": 13, "content_type": "announcement", "sentiment": "neutral", "technical_quality": "medium", "market_analysis": "other", "impact_potential": "MEDIUM", "relevance_confidence": "high", "evidence_spans": ["SN13", "x402 API"], "anchors_detected": ["SN13"]}
+
+EXAMPLE B — Alias/handle match:
+Post: "Omron's zkML fingerprinting proves inference authenticity."
+Call: {"subnet_id": 2, "content_type": "technical_insight", "sentiment": "neutral", "technical_quality": "high", "market_analysis": "other", "impact_potential": "MEDIUM", "relevance_confidence": "high", "evidence_spans": ["Omron", "zkML"], "anchors_detected": []}
+
+EXAMPLE C — General BitTensor, no specific subnet → NONE:
+Post: "Bittensor emissions debate rages on; validators should vote."
+Call: {"subnet_id": 0, "content_type": "governance", "sentiment": "neutral", "technical_quality": "none", "market_analysis": "political", "impact_potential": "LOW", "relevance_confidence": "low", "evidence_spans": [], "anchors_detected": ["Bittensor", "emissions", "validators"]}
+"""
+
+        user_prompt = f"""Classify the post below using the rules. Use only subnets from the list. If no rule fires, pick subnet_id=0.
+
+POST:
+"{text}"
+
+AVAILABLE_SUBNETS (exact-match fields only):
+{subnet_rows}
+
+{few_shot_examples}
+
+Now classify the provided post. Return exact substrings that triggered your decision."""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                tools=[CLASSIFICATION_TOOL],
+                tool_choice={"type": "function", "function": {"name": "classify_bittensor_post"}},
+                temperature=0,  # Deterministic
+                max_tokens=300
+            )
+            
+            # Extract function call
+            tool_call = response.choices[0].message.tool_calls[0]
+            args = json.loads(tool_call.function.arguments)
+            
+            # Parse and validate
+            return self._parse_classification(args)
+            
+        except Exception as e:
+            bt.logging.error(f"[ANALYZER] Classification error: {e}")
+            return None
+    
     def analyze_tweet_complete(self, text: str) -> dict:
-        """Complete analysis: relevance + sentiment"""
+        """
+        Backward compatibility wrapper for classify_post()
+        
+        This method provides compatibility with the original SubnetRelevanceAnalyzer API.
+        It runs classification on a post and returns results in a format compatible
+        with the old analyze_tweet_complete() method.
+        
+        Args:
+            text: Post text to analyze
+            
+        Returns:
+            Dict with classification results in legacy format
+        """
         start_time = time.time()
-        bt.logging.info(f"[ANALYZER] Starting analysis for tweet (length: {len(text)} chars)")
+        bt.logging.info(f"[ANALYZER] Starting analysis for post (length: {len(text)} chars)")
         bt.logging.info(f"[ANALYZER] Total registered subnets: {len(self.subnet_registry)}")
         
-        # Quick pre-filter: only evaluate subnets with keyword matches
-        text_lower = text.lower()
-        candidate_subnets = {}
+        # Run new classification
+        classification = self.classify_post(text)
         
-        for subnet_id, subnet_data in self.subnet_registry.items():
-            # Quick check: any identifier or function keyword in text?
-            has_potential = False
-            
-            # Check unique identifiers (like SN13, etc)
-            for identifier in subnet_data.get('unique_identifiers', []):
-                if identifier.lower() in text_lower:
-                    has_potential = True
-                    bt.logging.debug(f"[ANALYZER] Subnet {subnet_data['name']} matched identifier: {identifier}")
-                    break
-            
-            # If no identifier match, check if any primary function keywords appear
-            if not has_potential:
-                for func in subnet_data.get('primary_functions', []):
-                    # Simple keyword check
-                    if any(word.lower() in text_lower for word in func.split()[:3]):
-                        has_potential = True
-                        bt.logging.debug(f"[ANALYZER] Subnet {subnet_data['name']} matched function keyword: {func[:50]}")
-                        break
-            
-            # Only evaluate subnets that passed pre-filter
-            if has_potential:
-                candidate_subnets[subnet_id] = subnet_data
+        if classification is None:
+            bt.logging.warning(f"[ANALYZER] Classification failed, returning empty result")
+            return {
+                "text": text[:100] + "..." if len(text) > 100 else text,
+                "subnet_relevance": {},
+                "sentiment": 0.0,
+                "sentiment_reasoning": "Classification failed",
+                "timestamp": datetime.now().isoformat()
+            }
         
-        bt.logging.info(f"[ANALYZER] Pre-filter reduced {len(self.subnet_registry)} subnets to {len(candidate_subnets)} candidates")
-        
-        # Now only run expensive LLM evaluation on candidates
+        # Convert to legacy format
         subnet_relevance = {}
-        llm_call_count = 0
-        
-        for i, (subnet_id, subnet_data) in enumerate(candidate_subnets.items(), 1):
-            eval_start = time.time()
-            bt.logging.debug(f"[ANALYZER] Evaluating subnet {i}/{len(candidate_subnets)}: {subnet_data['name']}")
+        if classification.subnet_id != 0:
+            subnet_name = classification.subnet_name
+            # Map to legacy relevance score format
+            confidence_map = {"high": 0.9, "medium": 0.6, "low": 0.3}
+            relevance = confidence_map.get(classification.relevance_confidence, 0.6)
             
-            score_data = self._evaluate_single_subnet(text, subnet_data)
-            llm_call_count += 1
-            
-            eval_time = time.time() - eval_start
-            bt.logging.debug(f"[ANALYZER] Subnet {subnet_data['name']} evaluated in {eval_time:.2f}s - relevance: {score_data.get('relevance', 0.0)}")
-            
-            if score_data.get('relevance', 0.0) > 0:
-                subnet_relevance[subnet_data['name']] = score_data
+            subnet_relevance[subnet_name] = {
+                "relevance": relevance,
+                "confidence": classification.relevance_confidence,
+                "matched_signals": classification.evidence_spans,
+                "method": "deterministic_classification"
+            }
         
-        bt.logging.info(f"[ANALYZER] {len(subnet_relevance)} subnets have non-zero relevance (from {llm_call_count} LLM calls)")
-        
-        # Limit to top 10 if needed
-        if len(subnet_relevance) > 10:
-            sorted_subnets = sorted(
-                subnet_relevance.items(), 
-                key=lambda x: x[1].get('relevance', 0.0), 
-                reverse=True
-            )[:10]
-            subnet_relevance = dict(sorted_subnets)
-            bt.logging.info(f"[ANALYZER] Limited to top 10 subnets by relevance")
-        
-        # Get sentiment once
-        sentiment_start = time.time()
-        sentiment_data = self._analyze_sentiment(text)
-        sentiment_time = time.time() - sentiment_start
-        bt.logging.debug(f"[ANALYZER] Sentiment analysis completed in {sentiment_time:.2f}s")
+        # Map sentiment enum to numeric
+        sentiment_map = {
+            "very_bullish": 1.0,
+            "bullish": 0.5,
+            "neutral": 0.0,
+            "bearish": -0.5,
+            "very_bearish": -1.0
+        }
+        sentiment = sentiment_map.get(classification.sentiment.value, 0.0)
         
         total_time = time.time() - start_time
-        bt.logging.info(f"[ANALYZER] Total analysis completed in {total_time:.2f}s ({llm_call_count + 1} total LLM calls)")
+        bt.logging.info(f"[ANALYZER] Total analysis completed in {total_time:.2f}s")
         
         return {
             "text": text[:100] + "..." if len(text) > 100 else text,
             "subnet_relevance": subnet_relevance,
-            "sentiment": sentiment_data.get('sentiment', 0.0),
-            "sentiment_reasoning": sentiment_data.get('reasoning', ''),
-            "timestamp": datetime.now().isoformat()
+            "sentiment": sentiment,
+            "sentiment_reasoning": f"{classification.content_type.value}, {classification.technical_quality.value} quality",
+            "timestamp": datetime.now().isoformat(),
+            "classification": classification  # Include full classification for new code
         }
     
-    def _evaluate_single_subnet(self, text: str, subnet: dict) -> dict:
-        """Hybrid approach: LLM understanding + deterministic scoring"""
-        
-        # First, check for direct mentions (fully deterministic)
-        text_lower = text.lower()
-        direct_match = None
-        
-        # Check for BitTensor-specific subnet identifiers (SNxx format is unique to BitTensor)
-        for identifier in subnet.get('unique_identifiers', []):
-            # Check if it's a subnet number reference (SN2, SN13, etc)
-            if identifier.lower().startswith('sn') and identifier.lower() in text_lower:
-                direct_match = identifier
-                break
-            # For other identifiers, we'll rely on LLM context check
-        
-        # If direct SN match found, return immediately
-        if direct_match:
-            bt.logging.debug(f"[ANALYZER] Direct match found for subnet {subnet['name']}: {direct_match}")
-            return {
-                "relevance": 1.0,
-                "confidence": "high",
-                "matched_signals": [direct_match],
-                "method": "direct_match"
-            }
-        
-        # Otherwise, use LLM to identify concepts WITH BitTensor context check
+    def _parse_classification(self, args: dict) -> Optional[PostClassification]:
+        """Parse and validate function call arguments"""
         try:
-            features = self._extract_features_llm(text, subnet)
-            score = self._calculate_deterministic_score(features)
-            return score
-        except Exception as e:
-            bt.logging.error(f"[ANALYZER] Error evaluating subnet {subnet['name']}: {e}")
-            return {
-                "relevance": 0.0,
-                "confidence": "low",
-                "matched_signals": [],
-                "error": str(e)
-            }
-    
-    def _extract_features_llm(self, text: str, subnet: dict) -> dict:
-        """Use LLM to identify which subnet concepts are present"""
-        
-        system_prompt = "You identify BitTensor blockchain subnet concepts. Output only valid JSON."
-        
-        user_prompt = f"""Evaluate if this post is about a BitTensor blockchain subnet.
+            subnet_id = int(args["subnet_id"])
+            if subnet_id not in self.subnets:
+                bt.logging.warning(f"[ANALYZER] Unknown subnet_id: {subnet_id}")
+                return None
+            
+            # Parse evidence spans
+            evidence_spans = args.get("evidence_spans", [])
+            if not isinstance(evidence_spans, list):
+                evidence_spans = []
+            
+            anchors_detected = args.get("anchors_detected", [])
+            if not isinstance(anchors_detected, list):
+                anchors_detected = []
+            
+            return PostClassification(
+                subnet_id=subnet_id,
+                subnet_name=self.subnets[subnet_id]["name"],
+                content_type=ContentType(args["content_type"]),
+                sentiment=Sentiment(args["sentiment"]),
+                technical_quality=TechnicalQuality(args["technical_quality"]),
+                market_analysis=MarketAnalysis(args["market_analysis"]),
+                impact_potential=ImpactPotential(args["impact_potential"]),
+                relevance_confidence=args["relevance_confidence"],
+                evidence_spans=evidence_spans,
+                anchors_detected=anchors_detected
+            )
+        except (ValueError, KeyError) as e:
+            bt.logging.error(f"[ANALYZER] Parse error: {e}")
+            return None
 
-POST: "{text}"
-
-BITTENSOR SUBNET TO EVALUATE: {subnet['name']} (Subnet {subnet['id']})
-Primary Functions: {json.dumps(subnet.get('primary_functions', []))}
-Unique Identifiers: {json.dumps(subnet.get('unique_identifiers', []))}
-
-CRITICAL CONTEXT CHECK:
-This evaluation is for BitTensor Network subnets - decentralized AI networks on the BitTensor blockchain.
-The post MUST be about BitTensor/TAO/crypto/blockchain/decentralized AI to be relevant.
-
-EVALUATION STEPS:
-1. Is this post about BitTensor, TAO tokens, crypto subnets, or decentralized AI networks?
-   - Look for: BitTensor, TAO, subnets, validators, miners, emissions, decentralized AI
-   - If NO (e.g., traditional companies, non-crypto AI, unrelated topics) → return empty lists
-   - If YES → continue to step 2
-
-2. Does the post discuss any of this subnet's primary functions in a BitTensor context?
-   - Only include functions clearly discussed in relation to BitTensor/crypto
-
-Output format:
-{{"is_bittensor_related": true/false, "functions_found": ["list of matched primary functions"], "relevant_terms": ["actual BitTensor-related terms from post"]}}
-
-Examples:
-- Post about electronics company → {{"is_bittensor_related": false, "functions_found": [], "relevant_terms": []}}
-- Post about BitTensor subnet features → {{"is_bittensor_related": true, "functions_found": ["matched functions"], "relevant_terms": ["TAO", "subnet", etc]}}"""
-
-        llm_start = time.time()
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0,
-            max_tokens=150
-        )
-        llm_time = time.time() - llm_start
-        bt.logging.trace(f"[ANALYZER] LLM call for subnet {subnet['name']} took {llm_time:.2f}s")
-        
-        content = response.choices[0].message.content
-        if "```" in content:
-            content = content.split("```json")[-1].split("```")[0].strip()
-        
-        result = json.loads(content)
-        
-        # If not BitTensor related, return empty
-        if not result.get('is_bittensor_related', False):
-            return {"functions_found": [], "relevant_terms": []}
-        
-        return result
-    
-    def _calculate_deterministic_score(self, features: dict) -> dict:
-        """Deterministic scoring based on extracted features"""
-        
-        functions_found = features.get('functions_found', [])
-        relevant_terms = features.get('relevant_terms', [])
-        
-        # Deterministic scoring rules
-        num_functions = len(functions_found)
-        
-        if num_functions >= 2:
-            relevance = 0.7
-            confidence = "high"
-        elif num_functions == 1:
-            relevance = 0.4
-            confidence = "medium"
-        elif len(relevant_terms) > 0:
-            relevance = 0.2
-            confidence = "low"
-        else:
-            relevance = 0.0
-            confidence = "none"
-        
-        return {
-            "relevance": relevance,
-            "confidence": confidence,
-            "matched_signals": functions_found + relevant_terms,
-            "method": "llm_extraction"
-        }
-    
-    def _analyze_sentiment(self, text: str) -> dict:
-        """Crypto-focused sentiment analysis"""
-        
-        system_prompt = "You analyze sentiment in crypto/tech posts. Output only valid JSON."
-        
-        user_prompt = f"""Classify the sentiment of this post (may or may not be BitTensor-related).
-
-POST: "{text}"
-
-Determine the overall sentiment using these exact categories:
-- 1.0 = Very bullish (excitement, major positive developments, strong endorsement)
-- 0.5 = Moderately positive (optimistic, good news, mild endorsement)
-- 0.0 = Neutral (factual, informative, balanced, or mixed signals)
-- -0.5 = Moderately negative (concerns, skepticism, mild criticism)
-- -1.0 = Very bearish (major issues, strong criticism, failure)
-
-Consider:
-1. Is the author promoting or criticizing?
-2. Does it announce success or problems?
-3. Is the tone enthusiastic or concerned?
-
-Output format:
-{{"sentiment": <value from above>, "reasoning": "one-line explanation"}}"""
-
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0,
-            max_tokens=100
-        )
-        
-        content = response.choices[0].message.content
-        if "```" in content:
-            content = content.split("```json")[-1].split("```")[0].strip()
-        
-        try:
-            result = json.loads(content)
-            # Ensure sentiment is in valid range
-            sentiment = result.get('sentiment', 0.0)
-            result['sentiment'] = max(-1.0, min(1.0, sentiment))
-            return result
-        except:
-            return {"sentiment": 0.0, "reasoning": "Failed to parse"}
