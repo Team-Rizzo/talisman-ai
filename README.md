@@ -191,6 +191,8 @@ Copy `.vali_env_tmpl` to `.vali_env` and configure the following variables:
 
 
 ```bash
+pip install -r requirements.txt
+pip install -e .
 cp .miner_env_tmpl .miner_env
 # edit .miner_env to include your LLM information and X_BEARER_TOKEN
 python neurons/miner.py \
@@ -205,6 +207,8 @@ python neurons/miner.py \
 **Run Validator**
 
 ```bash
+pip install -r requirements.txt
+pip install -e .
 cp .vali_env_tmpl .vali_env
 # edit .vali_env to include your LLM information and X_BEARER_TOKEN
 python neurons/validator.py \
