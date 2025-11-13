@@ -12,9 +12,9 @@ BATCH_HTTP_TIMEOUT=30.0
 MAX_POSTS=0
 
 # Scraping configuration
-# Interval between scrape cycles in seconds (300 = 5 minutes)
-SCRAPE_INTERVAL_SECONDS=300
+# Interval between scrape cycles in seconds (90 = 1.5 minutes, yields ~10 posts per 15 minutes)
+SCRAPE_INTERVAL_SECONDS=90
 # Number of posts to scrape per cycle
 POSTS_PER_SCRAPE=5
 # Number of posts to submit per cycle (should be <= POSTS_PER_SCRAPE)
-POSTS_TO_SUBMIT=2
+POSTS_TO_SUBMIT=1
