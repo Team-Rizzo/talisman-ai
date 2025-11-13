@@ -188,7 +188,11 @@ Copy `.vali_env_tmpl` to `.vali_env` and configure the following variables:
 
 **Run Miner**
 
+
+
 ```bash
+cp .miner_env_tmpl .miner_env
+# edit .miner_env to include your LLM information and X_BEARER_TOKEN
 python neurons/miner.py \
   --netuid 45 \
   --wallet.name your_coldkey_here \
@@ -201,6 +205,8 @@ python neurons/miner.py \
 **Run Validator**
 
 ```bash
+cp .vali_env_tmpl .vali_env
+# edit .vali_env to include your LLM information and X_BEARER_TOKEN
 python neurons/validator.py \
   --netuid 45 \
   --wallet.name your_coldkey_here \
