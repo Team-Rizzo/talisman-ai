@@ -15,6 +15,6 @@ MAX_POSTS=0
 # Interval between scrape cycles in seconds (90 = 1.5 minutes, yields ~10 posts per 15 minutes)
 SCRAPE_INTERVAL_SECONDS=90
 # Number of posts to scrape per cycle
-POSTS_PER_SCRAPE=5
+POSTS_PER_SCRAPE=2
 # Number of posts to submit per cycle (should be <= POSTS_PER_SCRAPE)
 POSTS_TO_SUBMIT=1
