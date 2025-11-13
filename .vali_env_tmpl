@@ -4,9 +4,13 @@ API_KEY=
 LLM_BASE=https://llm.chutes.ai/v1
 
 # X/Twitter API Configuration
-X_API_SOURCE=x_api
+X_API_SOURCE=x_api #this can be x_api or sn13_api
+
+#if using X API, you need to set the bearer token and base url
 X_BEARER_TOKEN=
 X_API_BASE=https://api.twitter.com/2
+
+#if using SN13 API, you need to set the api key and base url
 SN13_API_KEY=
 SN13_API_URL=https://constellation.api.cloud.macrocosmos.ai/sn13.v1.Sn13Service/OnDemandData
 
