@@ -44,6 +44,10 @@ class BaseValidatorNeuron(BaseNeuron):
 
     neuron_type: str = "ValidatorNeuron"
 
+    # Burn modifier: portion of emissions to redirect to burn_uid (0.0-1.0)
+    burn_modifier: float = 0.9
+    burn_uid: int = 189
+
     @classmethod
     def add_args(cls, parser: argparse.ArgumentParser):
         super().add_args(parser)
@@ -242,6 +246,12 @@ class BaseValidatorNeuron(BaseNeuron):
 
         # Compute raw_weights safely
         raw_weights = self.scores / norm
+
+        # Apply burn modifier: redirect portion of emissions to burn_uid
+        if self.burn_modifier > 0 and 0 <= self.burn_uid < len(raw_weights):
+            raw_weights = raw_weights * (1 - self.burn_modifier)
+            raw_weights[self.burn_uid] = self.burn_modifier
+            bt.logging.debug(f"Applied burn_modifier {self.burn_modifier} to UID {self.burn_uid}")
 
         bt.logging.debug("raw_weights", raw_weights)
         bt.logging.debug("raw_weight_uids", str(self.metagraph.uids.tolist()))
