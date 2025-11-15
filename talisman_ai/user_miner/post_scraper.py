@@ -47,6 +47,15 @@ class PostScraper:
             return
 
         try:
+            # Validate MAX_RESULTS (X API v2 requires 10-100)
+            max_results = config.MAX_RESULTS
+            if max_results < 10:
+                bt.logging.warning(f"[PostScraper] MAX_RESULTS ({max_results}) is below X API minimum (10), using 10")
+                max_results = 10
+            elif max_results > 100:
+                bt.logging.warning(f"[PostScraper] MAX_RESULTS ({max_results}) exceeds X API maximum (100), using 100")
+                max_results = 100
+            
             # Build search query from keywords
             query = " OR ".join(self.keywords) + " -is:retweet lang:en"
             start_time = datetime.now(timezone.utc) - timedelta(hours=72)
@@ -58,7 +67,7 @@ class PostScraper:
             response = self.client.search_recent_tweets(
                 query=query,
                 start_time=start_time.isoformat().replace("+00:00", "Z"),
-                max_results=config.MAX_RESULTS,  # Fetch up to MAX_RESULTS tweets at once
+                max_results=max_results,  # Fetch up to MAX_RESULTS tweets at once (clamped to 10-100)
                 expansions=["author_id"],  # Expand to get user information
                 tweet_fields=["created_at", "public_metrics", "text"],
                 user_fields=["username", "name", "created_at", "public_metrics"]
@@ -136,6 +145,14 @@ class PostScraper:
         # Dynamic threshold: refetch when pool is less than 2x POSTS_PER_SCRAPE (min 5)
         # This ensures we have enough tweets for the next cycle
         refetch_threshold = max(5, config.POSTS_PER_SCRAPE * 2)
+        
+        # Warn if MAX_RESULTS is too small relative to threshold (could cause excessive refetching)
+        if config.MAX_RESULTS < refetch_threshold:
+            bt.logging.warning(
+                f"[PostScraper] MAX_RESULTS ({config.MAX_RESULTS}) is less than refetch threshold ({refetch_threshold}). "
+                f"Consider increasing MAX_RESULTS to at least {refetch_threshold} to avoid excessive API calls."
+            )
+        
         if len(self.tweets) < refetch_threshold:
             bt.logging.debug(f"[PostScraper] Running low on tweets ({len(self.tweets)} < {refetch_threshold}), fetching more...")
             self._fetch_tweets()
