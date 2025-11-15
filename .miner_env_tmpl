@@ -14,6 +14,9 @@ MAX_POSTS=0
 # Scraping configuration
 # Interval between scrape cycles in seconds (90 = 1.5 minutes, yields ~10 posts per 15 minutes)
 SCRAPE_INTERVAL_SECONDS=90
+# Maximum number of tweets to fetch per API call (default: 10)
+# Lower values reduce API usage; higher values provide more buffer
+MAX_RESULTS=10
 # Number of posts to scrape per cycle
 POSTS_PER_SCRAPE=2
 # Number of posts to submit per cycle (should be <= POSTS_PER_SCRAPE)

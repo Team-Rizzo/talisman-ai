@@ -58,7 +58,7 @@ class PostScraper:
             response = self.client.search_recent_tweets(
                 query=query,
                 start_time=start_time.isoformat().replace("+00:00", "Z"),
-                max_results=100,  # Fetch up to 100 tweets at once
+                max_results=config.MAX_RESULTS,  # Fetch up to MAX_RESULTS tweets at once
                 expansions=["author_id"],  # Expand to get user information
                 tweet_fields=["created_at", "public_metrics", "text"],
                 user_fields=["username", "name", "created_at", "public_metrics"]
@@ -133,8 +133,11 @@ class PostScraper:
             List of post dictionaries in the expected format
         """
         # Refresh tweets if we're running low or have none
-        if len(self.tweets) < 10:
-            bt.logging.debug("[PostScraper] Running low on tweets, fetching more...")
+        # Dynamic threshold: refetch when pool is less than 2x POSTS_PER_SCRAPE (min 5)
+        # This ensures we have enough tweets for the next cycle
+        refetch_threshold = max(5, config.POSTS_PER_SCRAPE * 2)
+        if len(self.tweets) < refetch_threshold:
+            bt.logging.debug(f"[PostScraper] Running low on tweets ({len(self.tweets)} < {refetch_threshold}), fetching more...")
             self._fetch_tweets()
         
         if not self.tweets:

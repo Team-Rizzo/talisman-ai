@@ -79,6 +79,8 @@ MAX_POSTS = int(os.getenv("MAX_POSTS", "1000"))
 # Scraping configuration
 # Interval between scrape cycles in seconds (default: 300 = 5 minutes)
 SCRAPE_INTERVAL_SECONDS = int(os.getenv("SCRAPE_INTERVAL_SECONDS", "300"))
+# Maximum number of tweets to fetch per API call (default: 10)
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
 # Number of posts to scrape per cycle (default: 1)
 POSTS_PER_SCRAPE = int(os.getenv("POSTS_PER_SCRAPE", "1"))
 # Number of posts to submit per cycle (default: 1)
