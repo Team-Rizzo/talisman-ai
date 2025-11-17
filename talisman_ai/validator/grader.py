@@ -273,7 +273,11 @@ def validate_with_x(post: Dict, x_client) -> Tuple[Optional[Dict], Dict]:
 
 # === Batch-level grading entry point ===
 def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, Dict]:
-    """Grade a list of posts. Stops on first failure; otherwise returns final score.">
+    """
+    Grade a list of posts using LLM validation only (tokens and sentiment).
+    X API validation is now done on the API side before posts are sent to validators.
+    
+    Stops on first failure; otherwise returns VALID.
     """
     # Basic sanity
     if not posts:
@@ -282,22 +286,17 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
         analyzer = analyzer or make_analyzer()
         if analyzer is None:
             return _err("analyzer_unavailable", "Analyzer not initialized")
-        x_client = x_client or make_x_client()
     except Exception as e:
-        return _err("x_api_unavailable", str(e))
+        return _err("analyzer_unavailable", str(e))
 
     for i, post in enumerate(posts):
         post_id = post.get("post_id")
         if not post_id:
             return _err("missing_post_id", "post_id is required", None, {}, i)
 
-        # --- Stage 1: live X validation ---
-        err, live = validate_with_x(post, x_client)
-        if err is not None:
-            err.update({"post_index": i})
-            return CONSENSUS_INVALID, {"error": err, "final_score": 0.0}
-
-        # --- Stage 2: content analysis validation ---
+        # --- LLM validation: content analysis (tokens and sentiment) ---
+        # Note: X API validation is now done on the API side, so we only validate
+        # the LLM analysis results (tokens/relevance and sentiment)
         content = post.get("content") or ""
         if not content:
             return _err("empty_content", "post content is empty", post_id, {}, i)
@@ -305,7 +304,7 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
         miner_tokens_raw = post.get("tokens") or {}
         miner_sent = float(post.get("sentiment") or 0.0)
         
-        # Get analysis result once - we'll reuse it for scoring to avoid duplicate LLM calls
+        # Get analysis result from LLM
         try:
             analysis_result = analyzer.analyze_post_complete(content)
         except Exception as e:
@@ -318,6 +317,7 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
         ref_tokens_raw_normalized = {str(k).strip().lower(): float(v.get("relevance", 0.0)) for k, v in ref_tokens_raw.items()}
         ref_sent = float(analysis_result.get("sentiment", 0.0))
         
+        # Validate tokens/relevance match
         miner_tokens, ref_tokens = select_tokens(miner_tokens_raw, ref_tokens_raw_normalized, k=128, eps=0.05)
         matches, token_diffs = tokens_match_within(miner_tokens, ref_tokens, TOKEN_TOLERANCE)
         if not matches:
@@ -326,30 +326,16 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
             return _err("tokens_mismatch", "subnet relevance differs beyond tolerance", post_id,
                         {"mismatches": top, "total_mismatches": len(token_diffs)}, i)
 
+        # Validate sentiment match
         if abs(miner_sent - ref_sent) > SENTIMENT_TOLERANCE:
             return _err("sentiment_mismatch", "sentiment differs beyond tolerance", post_id,
                         {"miner": miner_sent, "validator": ref_sent, "allowed": SENTIMENT_TOLERANCE, "diff": abs(miner_sent - ref_sent)}, i)
 
-        # --- Stage 3: score cross-check ---
-        followers_x = live.get("followers", 0)
-        likes_x, rts_x, replies_x = live.get("likes", 0), live.get("retweets", 0), live.get("replies", 0)
-        account_age_days = live.get("account_age_days", 0)
-        miner_score = float(post.get("score") or 0.0)
-        date_iso = iso_from_unix(live["created_at"])
-        try:
-            # Pass the already-computed analysis_result to avoid re-analyzing
-            v_score = compute_validator_score(content, date_iso, likes_x, rts_x, replies_x,
-                                              account_age_days, followers_x, analyzer, analysis_result)
-        except RuntimeError as e:
-            return _err("score_compute_error", str(e), post_id, {}, i)
+        # If we get here, this post passed all LLM validation checks
+        # Note: Score validation is removed since it requires X API metrics,
+        # which are now validated on the API side
 
-        if miner_score > v_score + SCORE_TOLERANCE:
-            return _err("score_inflation", "miner score exceeds validator tolerance", post_id,
-                        {"miner_score": miner_score, "validator_score": v_score, "allowed_over": SCORE_TOLERANCE}, i)
-
-        # If we get here, this post passed all validation checks
-
-    # All posts passed validation
+    # All posts passed LLM validation
     # Note: We don't calculate final_score here because the validator uses
     # avg_score_all_posts (API-calculated average of ALL posts) instead.
     n = len(posts)
@@ -363,8 +349,6 @@ def grade_hotkey(posts: List[Dict], analyzer=None, x_client=None) -> Tuple[int, 
         "tolerances": {
             "token": TOKEN_TOLERANCE,
             "sentiment": SENTIMENT_TOLERANCE,
-            "score": SCORE_TOLERANCE,
-            "metrics_rel": POST_METRIC_TOLERANCE,
         },
         "analyzer": {"version": analyzer_version},
     }
