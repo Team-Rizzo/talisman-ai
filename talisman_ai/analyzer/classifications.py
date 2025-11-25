@@ -22,6 +22,7 @@ class ContentType(str, Enum):
     HYPE = "hype"                               # Excitement, enthusiasm
     OPINION = "opinion"                         # Personal views, analysis
     COMMUNITY = "community"                      # General chatter, engagement
+    FUD = "fud"                                  # Fear, uncertainty, doubt
     OTHER = "other"
 
 
