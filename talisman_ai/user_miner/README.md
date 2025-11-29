@@ -49,11 +49,9 @@ The main orchestrator class that runs the processing loop. It:
 **Key Methods:**
 - `start()`: Starts the background processing thread, syncs with API block number
 - `stop()`: Stops the thread gracefully (waits up to 5 seconds)
-- `get_stats()`: Returns current statistics (posts processed, running status, etc.)
 - `_run()`: Main processing loop (runs in background thread)
-- `_get_current_block()`: Gets current block (prefers API's block number)
-- `_sync_with_api_block()`: Synchronizes miner's block tracking with API
-- `_should_scrape()`: Determines if new block window has started
+- `_should_scrape()`: Determines if it's time to scrape based on window info from the API
+- `_update_window_from_response()`: Updates window tracking from API responses
 
 ### PostScraper (`post_scraper.py`)
 
@@ -217,6 +215,15 @@ The miner respects the following environment variables from `.miner_env`:
 
 **Note:** Legacy variables (`SCRAPE_INTERVAL_SECONDS`, `POSTS_PER_SCRAPE`, `POSTS_TO_SUBMIT`) are no longer used. The miner now uses block-based windows aligned with API v2's rate limiting system.
 
+### Rate Limiting Configuration
+
+**IMPORTANT:** The miner's rate limit configuration (`BLOCKS_PER_WINDOW` and `MAX_SUBMISSIONS_PER_WINDOW`) **must match** the API server's configuration. These values are not independent tuning knobs - they must be changed together with the API server's settings to ensure proper synchronization.
+
+- The miner scrapes and attempts to submit at most `MAX_SUBMISSIONS_PER_WINDOW` posts per `BLOCKS_PER_WINDOW` block window.
+- The API server enforces these same limits server-side and returns 429 (rate limit exceeded) if exceeded.
+- The miner relies on the API as the source of truth for window boundaries and rate limit status.
+- Changing these values without updating the API server will cause rate limit mismatches and submission failures.
+
 ## Text Normalization
 
 The miner normalizes post content using `norm_text()` to ensure consistency with validator analysis:
@@ -238,17 +245,12 @@ The miner handles errors gracefully:
   - **429 (Rate Limit)**: Extracts block/window info, waits for next window, doesn't retry immediately
   - **409 (Conflict)**: Permanent failure (duplicate/conflict), marks post as seen, doesn't retry
   - **Other errors**: Retries up to 3 times with exponential backoff (3s, 6s, 12s)
-- **Block synchronization errors**: Falls back to subtensor if API unavailable
+- **Block synchronization errors**: Waits for API synchronization (via startup sync or submission responses)
 - **Thread errors**: Logs error, waits ~12 seconds (block time), continues loop
 
 ## Statistics
 
-The miner tracks:
-- `posts_processed`: Number of posts successfully submitted
-- `running`: Whether the miner is currently running
-- `thread_alive`: Whether the background thread is alive
-
-Access via `my_miner.get_stats()`.
+The miner tracks `posts_processed` internally (number of posts successfully submitted), which is logged when the miner stops.
 
 ## API v2 Integration
 
