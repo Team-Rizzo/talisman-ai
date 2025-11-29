@@ -12,39 +12,118 @@ This module handles HTTP communication with the subnet API server, including:
 import time
 import requests
 import bittensor as bt
-from typing import Dict, Optional
+from typing import Dict, Optional, TypedDict
+from dataclasses import dataclass
 
 from talisman_ai import config
 
-# Authentication utilities for creating signed headers
-# These functions generate the authentication headers required by the API
-def create_auth_message(timestamp=None):
-    """
-    Create a standardized authentication message for API requests.
-    
-    Args:
-        timestamp: Optional Unix timestamp. If not provided, uses current time.
-        
-    Returns:
-        Formatted authentication message string.
-    """
-    if timestamp is None:
-        timestamp = time.time()
-    return f"talisman-ai-auth:{int(timestamp)}"
 
-def sign_message(wallet, message):
+class BlockInfoDict(TypedDict, total=False):
     """
-    Sign a message with the wallet's hotkey.
+    Block/window information dictionary from API responses.
+    
+    Used for synchronizing miner window state with the API server.
+    All fields are optional as they may not all be present in every response.
+    """
+    current_block: int
+    window_start_block: int
+    window_end_block: int
+    next_window_start_block: int
+    blocks_per_window: int
+    current_window: int
+    blocks_until_next_window: int
+
+
+class RateLimitInfoDict(TypedDict, total=False):
+    """
+    Rate limit information dictionary from API 429 responses.
+    
+    Provides details about rate limit status and reset timing.
+    All fields are optional as they may not all be present in every response.
+    """
+    current_count: int
+    max_submissions: int
+    next_window_start_block: int
+    estimated_seconds_until_reset: int
+    blocks_per_window: int
+    current_window: int
+
+
+@dataclass
+class SubmissionResult:
+    """
+    Result of a post submission attempt.
+    
+    Attributes:
+        success: True if submission succeeded, False otherwise
+        block_info: BlockInfoDict with block/window info from API (for synchronization),
+                   or None if not available
+        error_status: HTTP status code if submission failed, None if successful
+    """
+    success: bool
+    block_info: Optional[BlockInfoDict]
+    error_status: Optional[int]
+
+
+def _extract_block_info(data: Dict) -> BlockInfoDict:
+    """
+    Extract block/window info from API response.
     
     Args:
-        wallet: Bittensor wallet containing the hotkey to sign with.
-        message: The message string to sign.
+        data: Dictionary containing API response data
         
     Returns:
-        Hexadecimal signature string.
+        BlockInfoDict with block/window info containing:
+        - current_block: Current block number
+        - window_start_block: Start block of current window
+        - window_end_block: End block of current window
+        - next_window_start_block: Start block of next window
+        - blocks_per_window: Number of blocks per window
+        - current_window: Current window number
     """
-    signature = wallet.hotkey.sign(message)
-    return signature.hex()
+    return {
+        "current_block": data.get("current_block"),
+        "window_start_block": data.get("window_start_block"),
+        "window_end_block": data.get("window_end_block"),
+        "next_window_start_block": data.get("next_window_start_block"),
+        "blocks_per_window": data.get("blocks_per_window"),
+        "current_window": data.get("current_window"),
+    }
+
+
+def _parse_error_response(resp: requests.Response) -> tuple[str, Optional[Dict]]:
+    """
+    Parse error detail and extra info from API error response.
+    
+    Args:
+        resp: Response object from requests library
+        
+    Returns:
+        Tuple of (error_detail: str, extra_info: Optional[Dict])
+    """
+    error_detail = "Unknown error"
+    extra_info = None
+    try:
+        error_data = resp.json()
+        detail = error_data.get("detail")
+        if isinstance(detail, dict):
+            error_detail = detail.get("message", "Error")
+            extra_info = detail
+        elif isinstance(detail, str):
+            error_detail = detail
+        elif isinstance(detail, list):
+            # List of validation errors
+            error_messages = []
+            for err in detail:
+                field = err.get("field", "unknown")
+                msg = err.get("message", "validation error")
+                error_messages.append(f"{field}: {msg}")
+            error_detail = "; ".join(error_messages)
+            extra_info = {"validation_errors": detail}
+    except Exception:
+        pass
+    return error_detail, extra_info
+
 
 class APIClient:
     """
@@ -53,6 +132,19 @@ class APIClient:
     Handles HTTP communication, retries, and error handling for post submissions.
     The API endpoint is idempotent, so duplicate submissions return a success status.
     """
+    
+    @staticmethod
+    def _create_auth_message(timestamp=None) -> str:
+        """Create a standardized authentication message for API requests."""
+        if timestamp is None:
+            timestamp = time.time()
+        return f"talisman-ai-auth:{int(timestamp)}"
+    
+    @staticmethod
+    def _sign_message(wallet, message: str) -> str:
+        """Sign a message with the wallet's hotkey."""
+        signature = wallet.hotkey.sign(message)
+        return signature.hex()
     
     def __init__(self, wallet: Optional[bt.wallet] = None):
         """
@@ -69,8 +161,103 @@ class APIClient:
         self.submission_count = 0
         self.base_url = config.MINER_API_URL
         self.wallet = wallet
+        # Use session for connection pooling and better performance
+        self.session = requests.Session()
+    
+    def close(self):
+        """Close the HTTP session."""
+        if self.session:
+            self.session.close()
 
-    def _submit_to_api(self, post_data: Dict) -> tuple[bool, Optional[Dict], Optional[int]]:
+    def _create_auth_headers(self) -> Dict[str, str]:
+        """
+        Create authentication headers for API requests.
+        
+        Returns:
+            Dictionary of auth headers, or empty dict if wallet not available.
+        """
+        if not self.wallet:
+            return {}
+        
+        try:
+            timestamp = time.time()
+            message = self._create_auth_message(timestamp)
+            signature = self._sign_message(self.wallet, message)
+            return {
+                "X-Auth-SS58Address": self.wallet.hotkey.ss58_address,
+                "X-Auth-Signature": signature,
+                "X-Auth-Message": message,
+                "X-Auth-Timestamp": str(timestamp)
+            }
+        except Exception as e:
+            bt.logging.warning(f"[APIClient] Failed to create auth headers: {e}, proceeding without auth")
+            return {}
+
+    def _handle_response(self, resp: requests.Response, post_id: str, hotkey: str) -> Optional[SubmissionResult]:
+        """
+        Handle HTTP response and return SubmissionResult if terminal, None to continue/retry.
+        
+        Args:
+            resp: Response object from requests
+            post_id: Post ID for logging
+            hotkey: Miner hotkey for logging
+        
+        Returns:
+            SubmissionResult if response is terminal (success or non-retryable error),
+            None if the request should be retried.
+        """
+        # Handle rate limit (429)
+        if resp.status_code == 429:
+            error_detail, rate_limit_info = _parse_error_response(resp)
+            if rate_limit_info and isinstance(rate_limit_info.get("rate_limit"), dict):
+                rate_limit_info = rate_limit_info["rate_limit"]
+            
+            reset_block = rate_limit_info.get("next_window_start_block") if rate_limit_info else None
+            reset_seconds = rate_limit_info.get("estimated_seconds_until_reset") if rate_limit_info else None
+            reset_block = reset_block or resp.headers.get("X-RateLimit-Reset-Block")
+            reset_seconds = reset_seconds or resp.headers.get("X-RateLimit-Reset-Seconds")
+            
+            log_msg = f"[APIClient][429] Rate limit exceeded for post {post_id} (hotkey: {hotkey}): {error_detail}"
+            if rate_limit_info:
+                current = rate_limit_info.get("current_count", "?")
+                max_subs = rate_limit_info.get("max_submissions", "?")
+                log_msg += f" ({current}/{max_subs} submissions used)"
+            if reset_seconds:
+                reset_minutes = int(reset_seconds) / 60
+                log_msg += f". Limit resets in ~{int(reset_seconds)}s (~{reset_minutes:.1f}min)"
+            if reset_block:
+                log_msg += f" at block {reset_block}"
+            log_msg += ". Will retry in next cycle."
+            
+            bt.logging.warning(log_msg)
+            block_info = _extract_block_info(rate_limit_info) if rate_limit_info else None
+            return SubmissionResult(success=False, block_info=block_info, error_status=429)
+        
+        # Handle 409 Conflict (permanent failure)
+        if resp.status_code == 409:
+            error_detail, _ = _parse_error_response(resp)
+            bt.logging.warning(f"[APIClient][409] Conflict for post {post_id} (hotkey: {hotkey}): {error_detail}. Not retrying.")
+            block_info = None
+            try:
+                error_data = resp.json()
+                block_info = _extract_block_info(error_data)
+            except Exception:
+                pass
+            return SubmissionResult(success=False, block_info=block_info, error_status=409)
+        
+        # Handle 422 Validation Error
+        if resp.status_code == 422:
+            error_detail, extra_info = _parse_error_response(resp)
+            validation_errors = extra_info.get("validation_errors") if extra_info else None
+            bt.logging.error(f"[APIClient][422] Validation error for post {post_id} (hotkey: {hotkey}): {error_detail}")
+            if validation_errors:
+                bt.logging.error(f"[APIClient][422] Validation details: {validation_errors}")
+            return SubmissionResult(success=False, block_info=None, error_status=422)
+        
+        # Not a special status code - return None to let caller handle normally
+        return None
+
+    def _submit_to_api(self, post_data: Dict) -> SubmissionResult:
         """
         Internal method to submit a post to the API server (v2).
         
@@ -87,12 +274,12 @@ class APIClient:
                       miner_hotkey, post_id, content, date, author, tokens, sentiment, etc.
         
         Returns:
-            Tuple of (success: bool, block_info: Optional[Dict], error_status: Optional[int]):
+            SubmissionResult containing:
             - success: True if submission succeeded (status "new", "duplicate", or "ok"), False otherwise.
                        Note: "duplicate" is treated as success since the API is idempotent.
                        Returns False if rate limited (429) - caller should wait before retrying.
-            - block_info: Dictionary with block/window info from API (for synchronization), or None if not available.
-                          Contains: current_block, window_start_block, window_end_block, next_window_start_block, blocks_per_window
+            - block_info: BlockInfoDict with block/window info from API (for synchronization), or None if not available.
+                          Contains: current_block, window_start_block, window_end_block, next_window_start_block, blocks_per_window, current_window
             - error_status: HTTP status code if submission failed, None if successful. Useful for determining retry behavior.
         """
         url = f"{self.base_url}/v2/submit"
@@ -100,157 +287,25 @@ class APIClient:
         hotkey = post_data.get("miner_hotkey", "")
         
         # Create authentication headers if wallet is available
-        headers = {}
-        if self.wallet:
-            try:
-                timestamp = time.time()
-                message = create_auth_message(timestamp)
-                signature = sign_message(self.wallet, message)
-                headers = {
-                    "X-Auth-SS58Address": self.wallet.hotkey.ss58_address,
-                    "X-Auth-Signature": signature,
-                    "X-Auth-Message": message,
-                    "X-Auth-Timestamp": str(timestamp)
-                }
-                bt.logging.debug(f"[APIClient] Added authentication headers for hotkey: {hotkey}")
-            except Exception as e:
-                bt.logging.warning(f"[APIClient] Failed to create auth headers: {e}, proceeding without auth")
-                headers = {}
+        headers = self._create_auth_headers()
+        if headers:
+            bt.logging.debug(f"[APIClient] Added authentication headers for hotkey: {hotkey}")
         
         bt.logging.info(f"[APIClient] Submitting post {post_id} to {url} (hotkey: {hotkey})")
         
-        # Retry logic: up to 3 attempts with exponential backoff
-        # Wait time = 3 * (2^attempt) seconds (gives 3s, 6s, 12s)
+        # Retry logic: up to MAX_SUBMIT_ATTEMPTS attempts with exponential backoff
+        # Wait time = SUBMIT_BACKOFF_BASE_SECONDS * (2^attempt) seconds (gives 3s, 6s, 12s)
         # For rate limits (429), we return immediately without retrying
         # (caller should wait for the next window)
-        max_attempts = 3
-        for attempt in range(max_attempts):
+        for attempt in range(config.MAX_SUBMIT_ATTEMPTS):
             try:
-                bt.logging.debug(f"[APIClient] Attempt {attempt+1}/{max_attempts} for post {post_id}")
-                resp = requests.post(url, json=post_data, headers=headers, timeout=10)
+                bt.logging.debug(f"[APIClient] Attempt {attempt+1}/{config.MAX_SUBMIT_ATTEMPTS} for post {post_id}")
+                resp = self.session.post(url, json=post_data, headers=headers, timeout=10)
                 
-                # Handle rate limit (429) separately - API enforces rate limits server-side
-                # When rate limited, we return immediately so the caller can wait for the next window
-                if resp.status_code == 429:
-                    error_detail = "Rate limit exceeded"
-                    rate_limit_info = None
-                    reset_block = None
-                    reset_seconds = None
-                    
-                    try:
-                        error_data = resp.json()
-                        # Handle both string and dict detail formats
-                        if isinstance(error_data.get("detail"), dict):
-                            detail_dict = error_data["detail"]
-                            error_detail = detail_dict.get("message", "Rate limit exceeded")
-                            rate_limit_info = detail_dict.get("rate_limit")
-                            if rate_limit_info:
-                                reset_block = rate_limit_info.get("next_window_start_block")
-                                reset_seconds = rate_limit_info.get("estimated_seconds_until_reset")
-                        elif isinstance(error_data.get("detail"), str):
-                            error_detail = error_data["detail"]
-                        
-                        # Also check headers for rate limit info
-                        reset_block = reset_block or resp.headers.get("X-RateLimit-Reset-Block")
-                        reset_seconds = reset_seconds or resp.headers.get("X-RateLimit-Reset-Seconds")
-                    except:
-                        pass
-                    
-                    # Build informative log message
-                    log_msg = f"[APIClient] ⚠️  Rate limit exceeded (429) for {post_id}: {error_detail}"
-                    if rate_limit_info:
-                        current = rate_limit_info.get("current_count", "?")
-                        max_subs = rate_limit_info.get("max_submissions", "?")
-                        log_msg += f" ({current}/{max_subs} submissions used)"
-                    if reset_seconds:
-                        reset_minutes = int(reset_seconds) / 60
-                        log_msg += f". Limit resets in ~{int(reset_seconds)}s (~{reset_minutes:.1f}min)"
-                    if reset_block:
-                        log_msg += f" at block {reset_block}"
-                    log_msg += ". Will retry in next cycle."
-                    
-                    bt.logging.warning(log_msg)
-                    # Don't retry immediately on rate limit - return False so caller can wait
-                    # for the next window. Extract block info from rate limit response if available.
-                    block_info = None
-                    if rate_limit_info:
-                        block_info = {
-                            "current_block": rate_limit_info.get("current_block"),
-                            "window_start_block": rate_limit_info.get("window_start_block"),
-                            "window_end_block": rate_limit_info.get("window_end_block"),
-                            "next_window_start_block": rate_limit_info.get("next_window_start_block"),
-                            "blocks_per_window": rate_limit_info.get("blocks_per_window"),
-                        }
-                    return False, block_info, 429
-                
-                # Handle 409 Conflict errors - these are permanent failures (duplicate/conflict)
-                # Don't retry these as they indicate the post was already submitted or conflicts exist
-                if resp.status_code == 409:
-                    try:
-                        error_data = resp.json()
-                        error_detail = error_data.get("detail", "Conflict")
-                        if isinstance(error_detail, dict):
-                            error_detail = error_detail.get("message", "Conflict")
-                    except:
-                        error_detail = "Conflict"
-                    
-                    bt.logging.warning(f"[APIClient] ✗ Conflict (409) for {post_id}: {error_detail}. Not retrying.")
-                    # Extract block info if available (even on error, API may return it for synchronization)
-                    block_info = None
-                    try:
-                        error_data = resp.json()
-                        block_info = {
-                            "current_block": error_data.get("current_block"),
-                            "window_start_block": error_data.get("window_start_block"),
-                            "window_end_block": error_data.get("window_end_block"),
-                            "next_window_start_block": error_data.get("next_window_start_block"),
-                            "blocks_per_window": error_data.get("blocks_per_window"),
-                        }
-                    except:
-                        pass
-                    return False, block_info, 409
-                
-                # Handle validation errors (422) - these indicate the request data is invalid
-                if resp.status_code == 422:
-                    error_detail = "Validation error"
-                    validation_errors = []
-                    try:
-                        error_data = resp.json()
-                        # Handle both string and dict detail formats
-                        if isinstance(error_data.get("detail"), list):
-                            # List of validation errors
-                            validation_errors = error_data["detail"]
-                            error_messages = []
-                            for err in validation_errors:
-                                field = err.get("field", "unknown")
-                                msg = err.get("message", "validation error")
-                                error_messages.append(f"{field}: {msg}")
-                            error_detail = "; ".join(error_messages)
-                        elif isinstance(error_data.get("detail"), dict):
-                            detail_dict = error_data["detail"]
-                            if isinstance(detail_dict.get("detail"), list):
-                                validation_errors = detail_dict["detail"]
-                                error_messages = []
-                                for err in validation_errors:
-                                    field = err.get("field", "unknown")
-                                    msg = err.get("message", "validation error")
-                                    error_messages.append(f"{field}: {msg}")
-                                error_detail = "; ".join(error_messages)
-                            else:
-                                error_detail = detail_dict.get("message", "Validation error - check field details")
-                        elif isinstance(error_data.get("detail"), str):
-                            error_detail = error_data["detail"]
-                    except:
-                        pass
-                    
-                    bt.logging.error(
-                        f"[APIClient] ✗ Validation error (422) for {post_id}: {error_detail}"
-                    )
-                    # Log full validation errors if available
-                    if validation_errors:
-                        bt.logging.error(f"[APIClient] Validation details: {validation_errors}")
-                    # Don't retry validation errors - they indicate a problem with the data format
-                    return False, None, 422
+                # Check for special status codes (429, 409, 422)
+                result = self._handle_response(resp, post_id, hotkey)
+                if result is not None:
+                    return result
                 
                 resp.raise_for_status()
                 data = resp.json()
@@ -261,30 +316,24 @@ class APIClient:
                 
                 # Extract block/window info for synchronization (API is source of truth for rate limiting)
                 # This ensures the miner's window calculations stay aligned with the server
-                block_info = {
-                    "current_block": data.get("current_block"),
-                    "window_start_block": data.get("window_start_block"),
-                    "window_end_block": data.get("window_end_block"),
-                    "next_window_start_block": data.get("next_window_start_block"),
-                    "blocks_per_window": data.get("blocks_per_window"),
-                }
+                block_info = _extract_block_info(data)
                 
                 # Log validation selection status prominently for user visibility
                 if selected_for_validation:
                     if x_validation_passed:
                         bt.logging.info(
-                            f"[APIClient] ✓ Post {post_id} SELECTED for validation (validation_id: {validation_id})"
+                            f"[APIClient][OK] Post {post_id} (hotkey: {hotkey}) SELECTED for validation (validation_id: {validation_id})"
                         )
                     else:
                         x_error = data.get("x_validation_error", {})
                         error_code = x_error.get("code", "unknown") if x_error else "unknown"
                         error_msg = x_error.get("message", "N/A") if x_error else "N/A"
                         bt.logging.warning(
-                            f"[APIClient] ⚠️  Post {post_id} selected but X validation FAILED: "
+                            f"[APIClient][OK] Post {post_id} (hotkey: {hotkey}) selected but X validation FAILED: "
                             f"{error_code} - {error_msg}"
                         )
                 else:
-                    bt.logging.debug(f"[APIClient] Post {post_id} submitted (not selected for validation)")
+                    bt.logging.debug(f"[APIClient][OK] Post {post_id} (hotkey: {hotkey}) submitted (not selected for validation)")
                 
                 # Log full response details at debug level
                 bt.logging.debug(
@@ -301,41 +350,30 @@ class APIClient:
                 # This means submitting the same post multiple times is safe and won't cause errors
                 success = status in ("new", "duplicate", "ok")
                 
-                # Return tuple: (success, block_info, error_status) for synchronization and error handling
-                return success, block_info, None
+                return SubmissionResult(success=success, block_info=block_info, error_status=None)
             except requests.HTTPError as e:
-                # Check if this is a 409 or 429 error (already handled above, but catch here for safety)
-                if hasattr(e.response, 'status_code'):
-                    status_code = e.response.status_code
-                    if status_code == 409:
-                        bt.logging.warning(f"[APIClient] Conflict (409) for {post_id}: {e}. Not retrying.")
-                        return False, None, 409
-                    if status_code == 429:
-                        # Should have been handled above, but handle here as fallback
-                        bt.logging.warning(f"[APIClient] Rate limit (429) for {post_id}: {e}. Not retrying.")
-                        return False, None, 429
-                
-                # Already handled 429 and 409 above, this is for other HTTP errors (500, 502, etc.)
-                bt.logging.warning(f"[APIClient] HTTP error on attempt {attempt+1}/{max_attempts} for {post_id}: {e}")
-                if attempt < max_attempts - 1:
-                    wait_time = 3 * (2 ** attempt)
+                # Note: 409 and 429 are handled above before raise_for_status() is called,
+                # so this block only handles other HTTP errors (500, 502, etc.)
+                error_status = e.response.status_code if hasattr(e, 'response') and e.response else None
+                bt.logging.warning(f"[APIClient][HTTP] HTTP error on attempt {attempt+1}/{config.MAX_SUBMIT_ATTEMPTS} for post {post_id} (hotkey: {hotkey}): {e}")
+                if attempt < config.MAX_SUBMIT_ATTEMPTS - 1:
+                    wait_time = config.SUBMIT_BACKOFF_BASE_SECONDS * (2 ** attempt)
                     bt.logging.debug(f"[APIClient] Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                 else:
                     # Last attempt failed, return error status
-                    error_status = e.response.status_code if hasattr(e, 'response') and e.response else None
-                    return False, None, error_status
+                    return SubmissionResult(success=False, block_info=None, error_status=error_status)
             except requests.RequestException as e:
                 # Network errors, timeouts, etc. - retry with exponential backoff
-                bt.logging.warning(f"[APIClient] Submit attempt {attempt+1}/{max_attempts} for {post_id} failed: {e}")
-                if attempt < max_attempts - 1:
-                    wait_time = 3 * (2 ** attempt)
+                bt.logging.warning(f"[APIClient][NET] Submit attempt {attempt+1}/{config.MAX_SUBMIT_ATTEMPTS} for post {post_id} (hotkey: {hotkey}) failed: {e}")
+                if attempt < config.MAX_SUBMIT_ATTEMPTS - 1:
+                    wait_time = config.SUBMIT_BACKOFF_BASE_SECONDS * (2 ** attempt)
                     bt.logging.debug(f"[APIClient] Retrying in {wait_time}s...")
                     time.sleep(wait_time)
-        bt.logging.error(f"[APIClient] All {max_attempts} attempts failed for post {post_id}")
-        return False, None, None
+        bt.logging.error(f"[APIClient][ERROR] All {config.MAX_SUBMIT_ATTEMPTS} attempts failed for post {post_id} (hotkey: {hotkey})")
+        return SubmissionResult(success=False, block_info=None, error_status=None)
 
-    def get_status(self) -> Optional[Dict]:
+    def get_status(self) -> Optional[BlockInfoDict]:
         """
         Query the API /v2/status endpoint to get current block and window information.
         
@@ -344,7 +382,7 @@ class APIClient:
         the server.
         
         Returns:
-            Dictionary with status info including:
+            BlockInfoDict with status info including:
             - current_block: Current block number (API's view)
             - window_start_block: Start block of current window
             - window_end_block: End block of current window
@@ -356,24 +394,18 @@ class APIClient:
         """
         url = f"{self.base_url}/v2/status"
         try:
-            resp = requests.get(url, timeout=10)
+            resp = self.session.get(url, timeout=10)
             resp.raise_for_status()
             data = resp.json()
             if data.get("status") == "ok":
-                return {
-                    "current_block": data.get("current_block"),
-                    "window_start_block": data.get("window_start_block"),
-                    "window_end_block": data.get("window_end_block"),
-                    "next_window_start_block": data.get("next_window_start_block"),
-                    "blocks_per_window": data.get("blocks_per_window"),
-                    "blocks_until_next_window": data.get("blocks_until_next_window"),
-                    "current_window": data.get("current_window"),
-                }
+                block_info = _extract_block_info(data)
+                block_info["blocks_until_next_window"] = data.get("blocks_until_next_window")
+                return block_info
         except Exception as e:
             bt.logging.debug(f"[APIClient] Failed to get status from API: {e}")
         return None
     
-    def submit_post(self, post_data: Dict) -> tuple[bool, Optional[Dict], Optional[int]]:
+    def submit_post(self, post_data: Dict) -> SubmissionResult:
         """
         Submit a post to the API server.
         
@@ -394,19 +426,19 @@ class APIClient:
                      - And other metadata fields
         
         Returns:
-            Tuple of (success: bool, block_info: Optional[Dict], error_status: Optional[int]):
+            SubmissionResult containing:
             - success: True if submission succeeded, False otherwise
-            - block_info: Dictionary with block/window info from API (for synchronization),
+            - block_info: BlockInfoDict with block/window info from API (for synchronization),
                          or None if not available
             - error_status: HTTP status code if submission failed, None if successful
         """
         self.submission_count += 1
-        success, block_info, error_status = self._submit_to_api(post_data)
-        if success:
+        result = self._submit_to_api(post_data)
+        if result.success:
             bt.logging.trace(f"[APIClient] Submitted post '{post_data.get('post_id')}' successfully")
         else:
             error_msg = f"[APIClient] API submission failed for post '{post_data.get('post_id')}'"
-            if error_status:
-                error_msg += f" (HTTP {error_status})"
+            if result.error_status:
+                error_msg += f" (HTTP {result.error_status})"
             bt.logging.warning(error_msg)
-        return success, block_info, error_status
+        return result

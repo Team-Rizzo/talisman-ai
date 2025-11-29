@@ -50,9 +50,15 @@ except ImportError:
 # ============================================================================
 
 # LLM Analysis
-MODEL = os.getenv("MODEL", "null")
-API_KEY = os.getenv("API_KEY", "null")
-LLM_BASE = os.getenv("LLM_BASE", "null")
+# Normalize empty strings to "null" (dotenv may set empty values as "")
+def _getenv_or_null(key: str, default: str = "null") -> str:
+    """Get env var, treating empty strings as missing (returns default)."""
+    value = os.getenv(key, default)
+    return default if (value == "" or value.strip() == "") else value
+
+MODEL = _getenv_or_null("MODEL", "null")
+API_KEY = _getenv_or_null("API_KEY", "null")
+LLM_BASE = _getenv_or_null("LLM_BASE", "null")
 
 # X/Twitter API Configuration
 X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "null")
@@ -71,21 +77,29 @@ X_API_SOURCE = os.getenv("X_API_SOURCE", "x_api")
 # Miner-Specific Configuration
 # ============================================================================
 
-# Scraping configuration
-# DEPRECATED: These are no longer used with block-based scraping approach.
-# The miner now uses BLOCKS_PER_WINDOW and MAX_SUBMISSIONS_PER_WINDOW instead.
-# Keeping these for backward compatibility but they have no effect.
-SCRAPE_INTERVAL_SECONDS = int(os.getenv("SCRAPE_INTERVAL_SECONDS", "300"))  # Unused - block-based now
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))  # Unused - count parameter used instead
-POSTS_PER_SCRAPE = int(os.getenv("POSTS_PER_SCRAPE", "1"))  # Unused - posts_per_window used instead
-POSTS_TO_SUBMIT = int(os.getenv("POSTS_TO_SUBMIT", "1"))  # Unused - all scraped posts are submitted
-
 # API v2 rate limit configuration
+# IMPORTANT: These values MUST match the API server's configuration.
+# Changing these without updating the API server will cause rate limit mismatches.
 # Maximum submissions per block window (default: 5, matches API v2 default)
-# Must match MAX_SUBMISSION_RATE in api_v2 if using API v2
+# Must match MAX_SUBMISSION_RATE in api/database.py if using API v2
 MAX_SUBMISSIONS_PER_WINDOW = int(os.getenv("MAX_SUBMISSIONS_PER_WINDOW", os.getenv("MAX_SUBMISSION_RATE", "5")))
 # Blocks per window (default: 100 blocks, ~20 minutes at 12s per block)
+# Must match BLOCKS_PER_WINDOW in api/database.py
 BLOCKS_PER_WINDOW = int(os.getenv("BLOCKS_PER_WINDOW", "100"))
+
+# Miner polling configuration
+# Approximate block time (seconds per block)
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "12.0"))
+# Check status endpoint every N poll iterations (~36 seconds with default values)
+STATUS_CHECK_INTERVAL = int(os.getenv("STATUS_CHECK_INTERVAL", "3"))
+
+# API retry configuration
+MAX_SUBMIT_ATTEMPTS = int(os.getenv("MAX_SUBMIT_ATTEMPTS", "3"))
+SUBMIT_BACKOFF_BASE_SECONDS = float(os.getenv("SUBMIT_BACKOFF_BASE_SECONDS", "3"))
+
+# Post scraper configuration
+# Comma-separated list of keywords to search for
+SCRAPER_KEYWORDS = os.getenv("SCRAPER_KEYWORDS", "sn45,talismanai,sn13,sn64").split(",")
 
 
 # ============================================================================

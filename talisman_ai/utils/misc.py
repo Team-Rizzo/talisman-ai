@@ -89,6 +89,28 @@ def _ttl_hash_gen(seconds: int):
         yield floor((time.time() - start_time) / seconds)
 
 
+def safe_int(value, default=0) -> int:
+    """
+    Safely convert to int, handling None values.
+    
+    Args:
+        value: Value to convert to int (can be None, int, float, or string)
+        default: Default value to use if value is None or empty (default: 0)
+        
+    Returns:
+        Integer value, or default if value is None/empty
+        
+    Example:
+        >>> safe_int(None)
+        0
+        >>> safe_int("5")
+        5
+        >>> safe_int(3.7)
+        3
+    """
+    return int(value or default)
+
+
 # 12 seconds updating block.
 @ttl_cache(maxsize=1, ttl=12)
 def ttl_get_block(self) -> int:

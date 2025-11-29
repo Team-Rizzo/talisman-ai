@@ -14,6 +14,7 @@ from typing import List, Dict, Optional
 import tweepy
 
 from talisman_ai import config
+from talisman_ai.utils.misc import safe_int
 
 
 class PostScraper:
@@ -33,12 +34,10 @@ class PostScraper:
         """
         self.client: Optional[tweepy.Client] = None
         
-        # ========================================================================
-        # CONFIGURABLE KEYWORDS: Modify this list to change search terms
-        # ========================================================================
-        # These keywords are used to search for relevant posts on X/Twitter.
-        # Posts matching any of these keywords will be fetched and analyzed.
-        self.keywords = ["sn45"]
+        # Keywords are configured via SCRAPER_KEYWORDS environment variable
+        # (comma-separated list, e.g., "sn45,talismanai,sn13,sn64")
+        # Defaults are set in config.py
+        self.keywords = config.SCRAPER_KEYWORDS
         
         self._init_client()
 
@@ -156,10 +155,10 @@ class PostScraper:
                     "author": author.username if author else "unknown",  # Username only (no @ prefix)
                     "timestamp": timestamp,  # Unix timestamp in seconds
                     "account_age": account_age_days,
-                    "retweets": int(public_metrics.get("retweet_count", 0) or 0),
-                    "likes": int(public_metrics.get("like_count", 0) or 0),
-                    "responses": int(public_metrics.get("reply_count", 0) or 0),
-                    "followers": int(author_metrics.get("followers_count", 0) or 0),  # Standardized: always int
+                    "retweets": safe_int(public_metrics.get("retweet_count", 0)),
+                    "likes": safe_int(public_metrics.get("like_count", 0)),
+                    "responses": safe_int(public_metrics.get("reply_count", 0)),
+                    "followers": safe_int(author_metrics.get("followers_count", 0)),  # Standardized: always int
                 }
                 posts.append(post_data)
             
