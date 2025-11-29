@@ -25,9 +25,10 @@ class Miner(BaseMinerNeuron):
         super(Miner, self).__init__(config=config)
 
         # Initialize the user miner (runs in background thread)
-        # Pass the hotkey, wallet, and subtensor for authentication and block tracking
+        # Pass the hotkey and wallet for authentication
+        # Block synchronization uses API responses only (no subtensor needed)
         hotkey = self.wallet.hotkey.ss58_address
-        self.my_miner = MyMiner(hotkey=hotkey, wallet=self.wallet, subtensor=self.subtensor)
+        self.my_miner = MyMiner(hotkey=hotkey, wallet=self.wallet)
         self.my_miner.start()
         
         bt.logging.info(f"User miner started with hotkey: {hotkey}")
