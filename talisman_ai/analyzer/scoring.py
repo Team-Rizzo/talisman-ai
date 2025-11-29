@@ -410,12 +410,14 @@ def score_post_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict = 
             "score": 0.0
         }
 
+    # Get analysis result if not provided (avoid double analysis)
+    if analysis_result is None:
+        analysis_result = analyzer.analyze_post_complete(info["post_text"])
+    
     # Get classification with full rich data
     rel, subnet_data = top_k_relevance_from_analyzer(info["post_text"], analyzer, k=k, analysis_result=analysis_result)
     
-    # Get the full classification object if available
-    if analysis_result is None:
-        analysis_result = analyzer.analyze_post_complete(info["post_text"])
+    # Get the full classification object
     classification = analysis_result.get("classification")
     
     # Compute engagement scores
