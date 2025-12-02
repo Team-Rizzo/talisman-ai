@@ -68,18 +68,25 @@ def select_tokens(miner_raw: Dict, ref_raw: Dict, k: int = 128, eps: float = 0.0
     """
     Select tokens for comparison.
     
-    Removes tiny values (< eps), keeps all validator tokens, adds miner tokens
-    (largest first) up to cap k. Prevents dropping validator-relevant tokens.
+    Only compares tokens found by BOTH miner and validator, plus validator-only tokens
+    (which represent missed detections). This prevents miners from padding submissions
+    with fake low-value tokens that would pass validation against 0.0.
     """
     mt = {k: v for k, v in normalize_keys(miner_raw).items() if abs(v) >= eps}
     rt = {k: v for k, v in normalize_keys(ref_raw).items() if abs(v) >= eps}
-    keep = set(rt.keys())
-    extras = sorted((set(mt) - keep), key=lambda x: (-abs(mt[x]), x))
-    for x in extras:
-        if len(keep) >= k:
-            break
-        keep.add(x)
-    return {k: mt.get(k, 0.0) for k in keep}, rt
+    
+    # Only compare tokens that both parties found relevant (common tokens)
+    # Plus validator-only tokens (miner missed these - should be penalized)
+    common_tokens = set(mt.keys()) & set(rt.keys())
+    validator_only = set(rt.keys()) - set(mt.keys())
+    
+    # Combine: common + validator-only (up to k tokens)
+    keep = common_tokens | validator_only
+    if len(keep) > k:
+        # If too many, prioritize by validator's relevance scores
+        keep = set(sorted(keep, key=lambda x: -abs(rt.get(x, 0.0)))[:k])
+    
+    return {k: mt.get(k, 0.0) for k in keep}, {k: rt.get(k, 0.0) for k in keep}
 
 def tokens_match_within(miner: Dict[str, float], ref: Dict[str, float], abs_tol: float, eps: float = 0.05) -> Tuple[bool, Dict]:
     """Compare tokens with absolute tolerance. Returns (match, diffs dict)."""

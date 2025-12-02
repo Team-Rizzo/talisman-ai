@@ -189,16 +189,38 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning("[SCORES] No scores in response")
             return
         
+        # Build hotkey→UID mapping from current metagraph to avoid race conditions
+        # This prevents issues if metagraph updates between score fetch and processing
+        hotkey_to_uid = {hotkey: uid for uid, hotkey in enumerate(self.metagraph.hotkeys)}
+        
         uids_to_update = []
         rewards_array = []
         
         for hotkey, score in scores.items():
-            try:
-                uid = self.metagraph.hotkeys.index(hotkey)
-                uids_to_update.append(uid)
-                rewards_array.append(float(score))
-            except ValueError:
-                bt.logging.debug(f"[SCORES] Hotkey {hotkey} not found in metagraph, skipping")
+            uid = hotkey_to_uid.get(hotkey)
+            if uid is not None:
+                # Validate score range before applying
+                try:
+                    score_float = float(score)
+                    if not (0.0 <= score_float <= 1.0):
+                        bt.logging.warning(
+                            f"[SCORES] Invalid score {score_float} for hotkey {hotkey[:8]}..., "
+                            f"clamping to [0.0, 1.0]"
+                        )
+                        score_float = max(0.0, min(1.0, score_float))
+                    
+                    if np.isnan(score_float) or np.isinf(score_float):
+                        bt.logging.error(
+                            f"[SCORES] NaN/Inf score for hotkey {hotkey[:8]}..., setting to 0.0"
+                        )
+                        score_float = 0.0
+                    
+                    uids_to_update.append(uid)
+                    rewards_array.append(score_float)
+                except (ValueError, TypeError) as e:
+                    bt.logging.error(f"[SCORES] Failed to process score for {hotkey[:8]}...: {e}")
+            else:
+                bt.logging.debug(f"[SCORES] Hotkey {hotkey[:8]}... not found in metagraph, skipping")
         
         if uids_to_update and rewards_array:
             rewards_np = np.array(rewards_array)

@@ -248,10 +248,17 @@ class BaseValidatorNeuron(BaseNeuron):
         raw_weights = self.scores / norm
 
         # Apply burn modifier: redirect portion of emissions to burn_uid
-        if self.burn_modifier > 0 and 0 <= self.burn_uid < len(raw_weights):
-            raw_weights = raw_weights * (1 - self.burn_modifier)
-            raw_weights[self.burn_uid] = self.burn_modifier
-            bt.logging.debug(f"Applied burn_modifier {self.burn_modifier} to UID {self.burn_uid}")
+        if self.burn_modifier > 0:
+            if 0 <= self.burn_uid < len(raw_weights):
+                # Redistribute: reduce all weights proportionally, give to burn_uid
+                raw_weights = raw_weights * (1 - self.burn_modifier)
+                raw_weights[self.burn_uid] += self.burn_modifier
+                bt.logging.debug(f"Applied burn_modifier {self.burn_modifier} to UID {self.burn_uid}")
+            else:
+                bt.logging.warning(
+                    f"Burn UID {self.burn_uid} out of range (metagraph size: {len(raw_weights)}). "
+                    f"Burn modifier {self.burn_modifier} not applied. Consider updating burn_uid."
+                )
 
         bt.logging.debug("raw_weights", raw_weights)
         bt.logging.debug("raw_weight_uids", str(self.metagraph.uids.tolist()))
