@@ -23,6 +23,7 @@ from talisman_ai.user_miner.post_scraper import PostScraper
 from talisman_ai.analyzer import setup_analyzer
 from talisman_ai.analyzer.scoring import score_post_entry
 from talisman_ai.utils.normalization import norm_text
+from talisman_ai.utils.security import LRUSet, validate_post_metrics
 
 class MyMiner:
     """
@@ -58,7 +59,9 @@ class MyMiner:
         self.subtensor = subtensor
 
         # Track post IDs we've already processed to avoid duplicate submissions
-        self._seen_post_ids: set[str] = set()
+        # Using LRUSet with bounded size to prevent unbounded memory growth
+        # Keeps last 10,000 post IDs (~200KB memory, covers ~27 days at 5 posts/20min)
+        self._seen_post_ids: LRUSet = LRUSet(maxsize=10000)
 
         # Threading state management
         self.lock = threading.Lock()
@@ -409,6 +412,14 @@ class MyMiner:
                             "sentiment": sentiment,
                             "score": post_score,
                         }
+                        
+                        # Validate and sanitize post data before submission
+                        try:
+                            post_data = validate_post_metrics(post_data)
+                        except ValueError as e:
+                            bt.logging.warning(f"[MyMiner] Post {pid} failed validation: {e}, skipping")
+                            continue
+                        
                         bt.logging.info(f"[MyMiner] Prepared post_data for {pid}: hotkey={post_data['miner_hotkey']}, author={post_data['author']}, score={post_score:.3f}")
 
                         # Submit post to API server

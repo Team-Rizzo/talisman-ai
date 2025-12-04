@@ -5,6 +5,11 @@ from typing import Dict, List, Tuple, Optional
 import bittensor as bt
 from talisman_ai.analyzer import setup_analyzer
 from talisman_ai.utils.normalization import norm_text
+from talisman_ai.utils.security import (
+    sentiments_match_categorical,
+    tokens_match_categorical,
+    detect_injection_attempt,
+)
 
 # =============================================================================
 # Post Validation System
@@ -28,8 +33,12 @@ from talisman_ai.utils.normalization import norm_text
 # =============================================================================
 
 CONSENSUS_VALID, CONSENSUS_INVALID = 1, 0
-TOKEN_TOLERANCE = 0.05
-SENTIMENT_TOLERANCE = 0.05
+# Increased tolerances to account for LLM variance between miner and validator
+# Original: 0.05 caused false INVALID due to non-deterministic LLM outputs
+TOKEN_TOLERANCE = 0.15  # Widened from 0.05
+SENTIMENT_TOLERANCE = 0.20  # Widened from 0.05
+# Use categorical matching as fallback when float comparison fails
+USE_CATEGORICAL_MATCHING = True
 
 def _err(code: str, message: str, post_id=None, details=None, post_index: Optional[int] = None):
     """Create standardized error response."""
@@ -83,12 +92,15 @@ def select_tokens(miner_raw: Dict, ref_raw: Dict, k: int = 128, eps: float = 0.0
 
 def tokens_match_within(miner: Dict[str, float], ref: Dict[str, float], abs_tol: float, eps: float = 0.05) -> Tuple[bool, Dict]:
     """Compare tokens with absolute tolerance. Returns (match, diffs dict)."""
+    # Small epsilon to handle IEEE 754 floating point precision errors
+    # e.g., abs(0.9 - 0.85) = 0.050000000000000044 which would incorrectly fail > 0.05
+    FP_EPSILON = 1e-9
     diffs = {}
     for k in (set(miner) | set(ref)):
         a, b = float(miner.get(k, 0.0)), float(ref.get(k, 0.0))
         if a < eps and b < eps:  # ignore noise
             continue
-        if abs(a - b) > abs_tol:
+        if abs(a - b) > abs_tol + FP_EPSILON:
             diffs[k] = {"miner": a, "validator": b, "allowed": abs_tol, "diff": abs(a - b)}
     return (len(diffs) == 0, diffs)
 
@@ -136,14 +148,39 @@ def grade_hotkey(posts: List[Dict], analyzer=None) -> Tuple[int, Dict]:
         ref_tokens_raw_normalized = {str(k).strip().lower(): float(v.get("relevance", 0.0)) for k, v in ref_tokens_raw.items()}
         ref_sent = float(analysis_result.get("sentiment", 0.0))
         
+        # Check for prompt injection attempts in content
+        if detect_injection_attempt(content):
+            bt.logging.warning(f"[GRADER] Potential prompt injection detected in post {post_id}")
+            # Continue validation but log the attempt
+        
         miner_tokens, ref_tokens = select_tokens(miner_tokens_raw, ref_tokens_raw_normalized, k=128, eps=0.05)
         matches, token_diffs = tokens_match_within(miner_tokens, ref_tokens, TOKEN_TOLERANCE)
+        
+        # If float comparison fails, try categorical matching as fallback
+        if not matches and USE_CATEGORICAL_MATCHING:
+            cat_matches, cat_diffs = tokens_match_categorical(miner_tokens, ref_tokens)
+            if cat_matches:
+                bt.logging.debug(f"[GRADER] Post {post_id}: Float token mismatch but categorical match passed")
+                matches = True
+                token_diffs = {}  # Clear diffs since categorical matched
+        
         if not matches:
             top = dict(sorted(token_diffs.items(), key=lambda kv: kv[1]["diff"], reverse=True)[:5])
             return _err("tokens_mismatch", "subnet relevance differs beyond tolerance", post_id,
                         {"mismatches": top, "total_mismatches": len(token_diffs)}, i)
 
-        if abs(miner_sent - ref_sent) > SENTIMENT_TOLERANCE:
+        # Check sentiment with float tolerance first
+        # Add FP_EPSILON to handle IEEE 754 floating point precision errors
+        FP_EPSILON = 1e-9
+        sentiment_matches = abs(miner_sent - ref_sent) <= SENTIMENT_TOLERANCE + FP_EPSILON
+        
+        # If float comparison fails, try categorical matching as fallback
+        if not sentiment_matches and USE_CATEGORICAL_MATCHING:
+            if sentiments_match_categorical(miner_sent, ref_sent):
+                bt.logging.debug(f"[GRADER] Post {post_id}: Float sentiment mismatch but categorical match passed")
+                sentiment_matches = True
+        
+        if not sentiment_matches:
             return _err("sentiment_mismatch", "sentiment differs beyond tolerance", post_id,
                         {"miner": miner_sent, "validator": ref_sent, "allowed": SENTIMENT_TOLERANCE, "diff": abs(miner_sent - ref_sent)}, i)
 

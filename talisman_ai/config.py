@@ -23,26 +23,30 @@ _MINER_ENV_PATH = _SUBNET_ROOT / ".miner_env"
 _VALI_ENV_PATH = _SUBNET_ROOT / ".vali_env"
 
 # Load environment files
+# Note: We don't print file paths to avoid leaking credential locations in logs
 try:
     from dotenv import load_dotenv
+    
+    _config_loaded = False
     
     # Load miner env file (if it exists)
     if _MINER_ENV_PATH.exists():
         load_dotenv(str(_MINER_ENV_PATH), override=True)
-        print(f"[CONFIG] Loaded {_MINER_ENV_PATH}")
-    else:
-        print(f"[CONFIG] Warning: {_MINER_ENV_PATH} not found")
+        _config_loaded = True
     
     # Load validator env file (if it exists)
     # Note: validator vars will override miner vars if both exist
     if _VALI_ENV_PATH.exists():
         load_dotenv(str(_VALI_ENV_PATH), override=True)
-        print(f"[CONFIG] Loaded {_VALI_ENV_PATH}")
-    else:
-        print(f"[CONFIG] Warning: {_VALI_ENV_PATH} not found")
+        _config_loaded = True
+    
+    # Only log at debug level, don't expose paths
+    if not _config_loaded:
+        import logging
+        logging.debug("[CONFIG] No env files found, using system environment variables")
         
 except ImportError:
-    print("[CONFIG] Warning: python-dotenv not installed, using system environment variables only")
+    pass  # Silently use system environment variables
 
 
 # ============================================================================
