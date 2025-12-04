@@ -30,6 +30,14 @@ try:
 except ImportError:
     config = None
 
+# Import security utilities for prompt sanitization
+try:
+    from talisman_ai.utils.security import sanitize_for_prompt
+except ImportError:
+    # Fallback if security module not available
+    def sanitize_for_prompt(text: str, max_length: int = 1000) -> str:
+        return text[:max_length].replace('"', "'") if text else ""
+
 
 @dataclass
 class PostClassification:
@@ -401,7 +409,9 @@ class SubnetRelevanceAnalyzer:
     
     def _classify_content_type(self, text: str) -> str:
         """Atomic decision: Content type"""
-        prompt = f"""Classify content type of: "{text}"
+        # Sanitize text to prevent prompt injection
+        safe_text = sanitize_for_prompt(text, max_length=500)
+        prompt = f"""Classify content type of: "{safe_text}"
 
 Pick the MOST SPECIFIC category that applies:
 - announcement: product launches, releases, updates
@@ -436,7 +446,9 @@ Pick the MOST SPECIFIC category that applies:
     
     def _classify_sentiment(self, text: str) -> str:
         """Atomic decision: Sentiment"""
-        prompt = f"""Classify sentiment of: "{text}"
+        # Sanitize text to prevent prompt injection
+        safe_text = sanitize_for_prompt(text, max_length=500)
+        prompt = f"""Classify sentiment of: "{safe_text}"
 
 Choose the sentiment that best matches the tone:
 - very_bullish: 🚀, moon, ATH, pump, explosive growth, massive gains
@@ -461,7 +473,9 @@ Choose the sentiment that best matches the tone:
     
     def _assess_technical_quality(self, text: str) -> str:
         """Atomic decision: Technical quality"""
-        prompt = f"""Assess technical quality of: "{text}"
+        # Sanitize text to prevent prompt injection
+        safe_text = sanitize_for_prompt(text, max_length=500)
+        prompt = f"""Assess technical quality of: "{safe_text}"
 
 - high: ≥2 specifics (APIs, versions, metrics)
 - medium: 1 specific detail
@@ -484,7 +498,9 @@ Choose the sentiment that best matches the tone:
     
     def _classify_market_analysis(self, text: str) -> str:
         """Atomic decision: Market analysis type"""
-        prompt = f"""Classify market analysis type in: "{text}"
+        # Sanitize text to prevent prompt injection
+        safe_text = sanitize_for_prompt(text, max_length=500)
+        prompt = f"""Classify market analysis type in: "{safe_text}"
 
 - technical: indicators, patterns
 - economic: fundamentals, costs
@@ -508,7 +524,9 @@ Choose the sentiment that best matches the tone:
     
     def _assess_impact(self, text: str) -> str:
         """Atomic decision: Impact potential"""
-        prompt = f"""Assess impact potential of: "{text}"
+        # Sanitize text to prevent prompt injection
+        safe_text = sanitize_for_prompt(text, max_length=500)
+        prompt = f"""Assess impact potential of: "{safe_text}"
 
 - HIGH: major releases, critical issues
 - MEDIUM: notable updates, partnerships
