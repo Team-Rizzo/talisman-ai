@@ -18,7 +18,9 @@
 # DEALINGS IN THE SOFTWARE.
 
 import bittensor as bt
-from typing import Optional, Dict, Any
+from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
+from talisman_ai.models.tweet import Tweet
 
 class Score(bt.Synapse):
     """
@@ -38,7 +40,18 @@ class Score(bt.Synapse):
 
     # Input set by validator - hotkey of the validator sending this score
     validator_hotkey: str
-
+    
+class IsAlive(bt.Synapse):
+    """
+    Synapse for sending is alive signal from miner to validator.
+    """
+    is_alive: bool 
+    
+class TweetBatch(bt.Synapse):
+    """
+    Synapse for sending tweet batch from miner to validator.
+    """
+    tweet_batch: List[Tweet] 
 
 class ValidationResult(bt.Synapse):
     """

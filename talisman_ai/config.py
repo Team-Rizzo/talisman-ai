@@ -100,3 +100,21 @@ VOTE_ENDPOINT = os.getenv("VOTE_ENDPOINT", "null")
 VALIDATION_POLL_SECONDS = int(os.getenv("VALIDATION_POLL_SECONDS", os.getenv("BATCH_POLL_SECONDS", "10")))
 SCORES_BLOCK_INTERVAL = int(os.getenv("SCORES_BLOCK_INTERVAL", "100"))
 
+MINER_BATCH_SIZE = int(os.getenv("MINER_BATCH_SIZE", "3"))
+BLOCK_LENGTH = int(os.getenv("BLOCK_LENGTH", "100"))
+START_BLOCK = int(os.getenv("START_BLOCK", "0"))
+
+# Tweet store configuration
+TWEET_STORE_LOCATION = os.getenv("TWEET_STORE_LOCATION", str(_SUBNET_ROOT / ".tweet_store.json"))
+TWEET_MAX_PROCESS_TIME = float(os.getenv("TWEET_MAX_PROCESS_TIME", "300.0"))  # 5 minutes default
+
+# Penalty and reward store configuration
+PENALTY_STORE_LOCATION = os.getenv("PENALTY_STORE_LOCATION", str(_SUBNET_ROOT / ".penalty_store.json"))
+REWARD_STORE_LOCATION = os.getenv("REWARD_STORE_LOCATION", str(_SUBNET_ROOT / ".reward_store.json"))
+
+USD_PRICE_PER_POINT = float(os.getenv("USD_PRICE_PER_POINT", "0.0000015"))
+FINNEY_RPC = os.getenv("FINNEY_RPC", "wss://entrypoint-finney.opentensor.ai:443")
+
+EPOCH_LENGTH = int(os.getenv("EPOCH_LENGTH", "100"))
+
+BURN_UID = int(os.getenv("BURN_UID", "189"))

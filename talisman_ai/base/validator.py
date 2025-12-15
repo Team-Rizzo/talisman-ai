@@ -28,6 +28,8 @@ import bittensor as bt
 from typing import List, Union
 from traceback import print_exception
 
+import talisman_ai
+
 from talisman_ai.base.neuron import BaseNeuron
 from talisman_ai.base.utils.weight_utils import (
     process_weights_for_netuid,
@@ -35,6 +37,7 @@ from talisman_ai.base.utils.weight_utils import (
 )  # TODO: Replace when bittensor switches to numpy
 from talisman_ai.mock import MockDendrite
 from talisman_ai.utils.config import add_validator_args
+from talisman_ai.protocol import TweetBatch
 
 
 class BaseValidatorNeuron(BaseNeuron):
@@ -101,6 +104,11 @@ class BaseValidatorNeuron(BaseNeuron):
                     netuid=self.config.netuid,
                     axon=self.axon,
                 )
+                self.axon.attach(
+                    forward_fn=self.forward_tweets,
+                    blacklist_fn=self.blacklist_tweets,
+                    priority_fn=self.priority_tweets,
+                )
                 bt.logging.info(
                     f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
                 )
@@ -114,10 +122,62 @@ class BaseValidatorNeuron(BaseNeuron):
             )
             pass
 
+    async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
+        """
+        Forward tweets to the network.
+        """
+        return synapse
+    
+    async def blacklist_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> bool:
+        if synapse.dendrite is None or synapse.dendrite.hotkey is None:
+            bt.logging.warning(
+                "Received a request without a dendrite or hotkey."
+            )
+            return True, "Missing dendrite or hotkey"
+
+        # TODO(developer): Define how miners should blacklist requests.
+        # Check if hotkey is registered BEFORE trying to get its index
+        if (
+            not self.config.blacklist.allow_non_registered
+            and synapse.dendrite.hotkey not in self.metagraph.hotkeys
+        ):
+            # Ignore requests from un-registered entities.
+            bt.logging.trace(
+                f"Blacklisting un-registered hotkey {synapse.dendrite.hotkey}"
+            )
+            return True, "Unrecognized hotkey"
+
+        # Only get uid if hotkey is in metagraph (to avoid IndexError)
+        try:
+            uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
+        except ValueError:
+            # Hotkey not found in metagraph (shouldn't happen if check above passed, but be safe)
+            bt.logging.warning(f"Hotkey {synapse.dendrite.hotkey} not found in metagraph")
+            return True, "Hotkey not in metagraph"
+
+        # if self.config.blacklist.force_validator_permit:
+        #     # If the config is set to force validator permit, then we should only allow requests from validators.
+        #     if not self.metagraph.validator_permit[uid]:
+        #         bt.logging.warning(
+        #             f"Blacklisting a request from non-validator hotkey {synapse.dendrite.hotkey}"
+        #         )
+        #         return True, "Non-validator hotkey"
+
+        bt.logging.trace(
+            f"Not Blacklisting recognized hotkey {synapse.dendrite.hotkey}"
+        )
+        return False, "Hotkey recognized!"
+    
+    async def priority_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> float:
+        """
+        Priority tweets to the network.
+        """
+        return 1.0
+    
     async def concurrent_forward(self):
         coroutines = [
             self.forward()
-            for _ in range(self.config.neuron.num_concurrent_forwards)
+            for _ in range(1)
         ]
         await asyncio.gather(*coroutines)
 
@@ -228,7 +288,7 @@ class BaseValidatorNeuron(BaseNeuron):
         """
         Sets the validator weights to the metagraph hotkeys based on the scores it has received from the miners. The weights determine the trust and incentive level the validator assigns to miner nodes on the network.
         """
-
+        
         # Check if self.scores contains any NaN values and log a warning if it does.
         if np.isnan(self.scores).any():
             bt.logging.warning(
@@ -247,12 +307,12 @@ class BaseValidatorNeuron(BaseNeuron):
         # Compute raw_weights safely
         raw_weights = self.scores / norm
 
-        # Apply burn modifier: redirect portion of emissions to burn_uid
-        if self.burn_modifier > 0 and 0 <= self.burn_uid < len(raw_weights):
-            raw_weights = raw_weights * (1 - self.burn_modifier)
-            raw_weights[self.burn_uid] = self.burn_modifier
-            bt.logging.debug(f"Applied burn_modifier {self.burn_modifier} to UID {self.burn_uid}")
-
+        # # Apply burn modifier: redirect portion of emissions to burn_uid
+        # if self.burn_modifier > 0 and 0 <= self.burn_uid < len(raw_weights):
+        #     raw_weights = raw_weights * (1 - self.burn_modifier)
+        #     raw_weights[self.burn_uid] = self.burn_modifier
+        #     bt.logging.debug(f"Applied burn_modifier {self.burn_modifier} to UID {self.burn_uid}")
+        
         bt.logging.debug("raw_weights", raw_weights)
         bt.logging.debug("raw_weight_uids", str(self.metagraph.uids.tolist()))
         # Process the raw weights to final_weights via subtensor limitations.
@@ -369,9 +429,8 @@ class BaseValidatorNeuron(BaseNeuron):
 
         # Update scores with rewards produced by this step.
         # shape: [ metagraph.n ]
-        alpha: float = self.config.neuron.moving_average_alpha
         self.scores: np.ndarray = (
-            alpha * scattered_rewards + (1 - alpha) * self.scores
+            scattered_rewards
         )
         bt.logging.debug(f"Updated moving avg scores: {self.scores}")
 

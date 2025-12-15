@@ -31,7 +31,14 @@ class Miner(BaseMinerNeuron):
         self.my_miner.start()
         
         bt.logging.info(f"User miner started with hotkey: {hotkey}")
-
+    
+    async def forward_is_alive(self, synapse: talisman_ai.protocol.IsAlive) -> talisman_ai.protocol.IsAlive:
+        """
+        Processes incoming IsAlive synapses from validators.
+        """
+        synapse.is_alive = True
+        return synapse
+    
     async def forward(self, synapse: bt.Synapse) -> bt.Synapse:
         """
         Processes incoming synapses. This method should be implemented with your custom logic.

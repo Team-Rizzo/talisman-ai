@@ -86,6 +86,11 @@ class BaseMinerNeuron(BaseNeuron):
         self.axon.attach(
             forward_fn=self.forward_validation_result
         )
+        # Attach forward_is_alive handler for IsAlive synapses
+        bt.logging.info(f"Attaching forward_is_alive function to miner axon.")
+        self.axon.attach(
+            forward_fn=self.forward_is_alive
+        )
         bt.logging.info(f"Axon created: {self.axon}")
 
         # Instantiate runners

@@ -13,7 +13,13 @@ from talisman_ai.validator.validation_client import ValidationClient
 from talisman_ai.validator.grader import grade_hotkey, CONSENSUS_VALID, CONSENSUS_INVALID
 from talisman_ai.analyzer import setup_analyzer
 import talisman_ai.protocol
-
+from talisman_ai import config
+from talisman_ai.utils.api_models import TweetWithUser, CompletedTweetSubmission   
+from talisman_ai.protocol import TweetBatch
+from talisman_ai.utils.uids import get_random_uids
+from talisman_ai.utils.tweet_store import TweetStore
+from talisman_ai.utils.reward import MinerReward
+from talisman_ai.utils.penalty import MinerPenalty
 
 class Validator(BaseValidatorNeuron):
     """
@@ -38,52 +44,66 @@ class Validator(BaseValidatorNeuron):
         bt.logging.info("[VALIDATION] Analyzer initialized")
 
         # Initialize validation client
-        self._validation_client = ValidationClient(wallet=self.wallet)
+        self._validation_client = ValidationClient(validator=self, wallet=self.wallet)
         self._validation_task: Optional[asyncio.Task] = None
         self._pending_results: List[Dict[str, Any]] = []
+        self._tweet_store = TweetStore()
+        self._miner_reward = MinerReward(config.BLOCK_LENGTH, self.block)
+        self._miner_penalty = MinerPenalty(config.BLOCK_LENGTH, self.block)
+        
+        self._tweet_store.load_from_file()
+        self._miner_reward.load_from_file()
+        self._miner_penalty.load_from_file()
+        
+    async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
+        """
+        The synapse is a TweetBatch from the miner
+        """
+        # Score the tweets
+        scores = await ... # TODO: Implement this 
+        if any(score == 0 for score in scores):
+            hotkey = synapse.dendrite.hotkey
+            for tweet in synapse.tweet_batch:
+                self._tweet_store.reset_to_unprocessed(tweet.id)
+            self._miner_penalty.add_penalty(hotkey, "Invalid score")
+            return synapse
 
-    async def _on_validations(self, validations: List[Dict[str, Any]]):
+        for tweet, score in zip(synapse.tweet_batch, scores):
+            self._tweet_store.set_processed(tweet.id)
+            self._miner_reward.add_reward(synapse.dendrite.hotkey, 1)
+        return synapse
+        
+    async def _on_tweets(self, tweets: List[TweetWithUser]):
         """
         Process multiple validation payloads in batch (sequentially).
         
         Args:
-            validations: List of validation payloads, each with validation_id, miner_hotkey, post, selected_at
+            tweets: List of tweets
         """
-        if not validations:
+        if not tweets:
             return
         
-        bt.logging.info(f"[VALIDATION] Processing {len(validations)} validation(s) in batch")
-        
-        # Process all validations sequentially (one at a time)
+        bt.logging.info(f"[VALIDATION] Processing {len(tweets)} tweets in batch")
+        for tweet in tweets:
+            self._tweet_store.add_tweet(tweet, set_as_processing=False)
+        # Process all tweets sequentially (one at a time)
         results = []
         validation_results_by_hotkey = {}  # Group validation results by hotkey for batching
-        
-        for validation in validations:
-            result = await self._process_single_validation(validation, validation_results_by_hotkey)
-            results.append(result)
-        
-        # Add all results to pending
-        self._pending_results.extend(results)
-        
-        # Submit all results to API FIRST (before sending synapses)
-        await self._submit_pending_results()
-        
-        # Send batched ValidationResult synapses to miners AFTER API submission
-        if validation_results_by_hotkey:
-            bt.logging.info(
-                f"[VALIDATION] Sending ValidationResult synapses to {len(validation_results_by_hotkey)} miner(s)"
-            )
-            await self._send_batched_validation_results(validation_results_by_hotkey)
-        else:
-            bt.logging.warning("[VALIDATION] No validation results to send to miners")
-    
-    async def _process_single_validation(
+        miner_batches = []  
+        for i in range(0, len(tweets.tweets), config.MINER_BATCH_SIZE):
+            miner_batches.append(tweets.tweets[i:i + config.MINER_BATCH_SIZE])
+        uids = get_random_uids(self.metagraph, self.dendrite, k=len(miner_batches), is_alive=True)
+
+        for miner_batch, uid in zip(miner_batches, uids):
+            await self._process_miner_batch(miner_batch, uid)
+            
+    async def _process_miner_batch( 
         self, 
-        validation: Dict[str, Any],
-        validation_results_by_hotkey: Dict[str, List[Dict[str, Any]]]
-    ) -> Dict[str, Any]:
+        miner_batch: List[TweetWithUser],
+        uid: int
+    ) -> TweetBatch:
         """
-        Process a single validation payload.
+        Process a miner batch.
         
         Args:
             validation: Validation payload with validation_id, miner_hotkey, post, selected_at
@@ -92,60 +112,39 @@ class Validator(BaseValidatorNeuron):
         Returns:
             Result dict ready for submission
         """
-        validation_id = validation.get("validation_id")
-        miner_hotkey = validation.get("miner_hotkey")
-        post = validation.get("post", {})
-        
-        bt.logging.info(f"[VALIDATION] Processing validation_id={validation_id}, miner_hotkey={miner_hotkey}")
-        
-        # Grade the post (run in executor to avoid blocking, reuse analyzer)
-        loop = asyncio.get_event_loop()
-        # Use lambda to pass analyzer as second positional argument
-        label, grade_result = await loop.run_in_executor(
-            None, 
-            lambda: grade_hotkey([post], analyzer=self._analyzer)
-        )
-        
-        # Determine success and failure_reason
-        success = label == CONSENSUS_VALID
-        failure_reason = None
-        post_id = post.get("post_id", "unknown")
-        
-        if not success:
-            error_info = grade_result.get("error", {})
-            failure_reason = {
-                "code": error_info.get("code", "unknown_error"),
-                "message": error_info.get("message", "Unknown error"),
-                "post_id": error_info.get("post_id", post_id),
-                "details": error_info.get("details", {})
-            }
-            bt.logging.warning(
-                f"[VALIDATION] ✗ Validation FAILED for {miner_hotkey}: "
-                f"{failure_reason['code']} - {failure_reason['message']}"
+        try:
+            tweet_batch = TweetBatch(
+                tweet_batch=miner_batch
             )
-        else:
-            bt.logging.info(f"[VALIDATION] ✓ Validation PASSED for {miner_hotkey}")
-        
-        # Accumulate validation result for batching (instead of sending immediately)
-        if miner_hotkey not in validation_results_by_hotkey:
-            validation_results_by_hotkey[miner_hotkey] = []
-        
-        validation_results_by_hotkey[miner_hotkey].append({
-            "validation_id": validation_id,
-            "post_id": post_id,
-            "success": success,
-            "failure_reason": failure_reason
-        })
-        
-        # Return result dict
-        return {
-            "validator_hotkey": str(self.wallet.hotkey.ss58_address),
-            "validation_id": validation_id,
-            "miner_hotkey": miner_hotkey,
-            "success": success,
-            "failure_reason": failure_reason,
-        }
-
+            responses = await self.dendrite.forward(
+                axons=[self.metagraph.axons[uid]],
+                synapse=tweet_batch,
+                timeout=12.0,
+                deserialize=True
+            )
+            if not responses[0].dendrite.status_code == 200:
+                bt.logging.error(f"[VALIDATION] Failed to process miner batch: {responses[0].dendrite.status_message}")
+                return None
+            hotkey = self.metagraph.hotkeys[uid] # TODO no clue if this works
+            for tweet in tweet_batch.tweet_batch:
+                self._tweet_store.set_processing(tweet.id, hotkey)
+            
+            return responses[0]
+        except Exception as e:
+            bt.logging.error(f"[VALIDATION] Failed to process miner batch: {e}", exc_info=True)
+            return None
+    
+    async def _submit_tweet_batch(self, tweet_batch: List[TweetWithUser]):
+        """Submit a tweet batch to the API"""
+        completed_tweets = []
+        for tweet in tweet_batch:
+            completed_tweets.append(CompletedTweetSubmission(
+                tweet_id=tweet.id,
+                sentiment=tweet.sentiment
+            ))
+        response = await self._validation_client.api_client.submit_completed_tweets(completed_tweets)
+        return response
+    
     async def _submit_pending_results(self):
         """Submit pending validation results to the API"""
         if not self._pending_results:
@@ -360,8 +359,7 @@ class Validator(BaseValidatorNeuron):
         if self._validation_task is None:
             self._validation_task = asyncio.create_task(
                 self._validation_client.run(
-                    on_validations=self._on_validations,
-                    on_scores=self._on_scores,
+                    on_tweets=self._on_tweets,
                 )
             )
             bt.logging.info("[VALIDATION] Started validation client")
