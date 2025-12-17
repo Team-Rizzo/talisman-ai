@@ -210,11 +210,14 @@ pip install -r requirements.txt
 pip install -e .
 cp .vali_env_tmpl .vali_env
 # edit .vali_env to include your LLM information and X_BEARER_TOKEN
-python neurons/validator.py \
-  --netuid 45 \
-  --wallet.name your_coldkey_here \
-  --wallet.hotkey your_hotkey_here \
-  --logging.info
+python3 scripts/start_validator.py
+    --netuid 45
+    --subtensor.network <finney/local/test>
+    --neuron.device cuda
+    --wallet.name <your wallet> # Must be created using the bittensor-cli
+    --wallet.hotkey <your hotkey> # Must be created using the bittensor-cli
+    --logging.debug # Run in debug mode, alternatively --logging.trace for trace mode
+    --axon.port # VERY IMPORTANT: set the port to be one of the open TCP ports on your machine
 ```
 
 ---
