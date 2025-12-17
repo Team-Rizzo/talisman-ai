@@ -68,27 +68,38 @@ class Validator(BaseValidatorNeuron):
         """
         # Note: in the normal workflow we query miners via dendrite and handle the response in
         # `_process_miner_batch()`. This axon handler is retained for compatibility/testing.
+        # Since we didn't initiate this request, we pass tweet_batch as sent_batch (no size check).
         miner_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
         if not miner_hotkey:
             return synapse
-        await self._handle_miner_batch_response(synapse.tweet_batch, miner_hotkey)
+        await self._handle_miner_batch_response(synapse.tweet_batch, miner_hotkey, synapse.tweet_batch)
         return synapse
 
-    async def _handle_miner_batch_response(self, tweet_batch: List[TweetWithAuthor], miner_hotkey: str) -> bool:
+    async def _handle_miner_batch_response(
+        self,
+        tweet_batch: List[TweetWithAuthor],
+        miner_hotkey: str,
+        sent_batch: List[TweetWithAuthor],
+    ) -> bool:
         """
         Validate a miner's TweetBatch response and apply rewards/penalties exactly once per tweet.
+
+        Args:
+            tweet_batch: The batch returned by the miner.
+            miner_hotkey: The miner's hotkey.
+            sent_batch: The original batch sent to the miner (for size verification).
 
         Returns:
             True if batch accepted, False otherwise.
         """
-        # Ensure expected batch size (but don't crash the pipeline; treat mismatch as invalid).
-        if len(tweet_batch) != config.MINER_BATCH_SIZE:
+        # Miner must return exactly what was sent (no cherry-picking).
+        if len(tweet_batch) != len(sent_batch):
             bt.logging.warning(
-                f"[VALIDATION] Invalid batch size from miner {miner_hotkey[:12]}.. "
-                f"{len(tweet_batch)} != {config.MINER_BATCH_SIZE}"
+                f"[VALIDATION] Batch size mismatch from miner {miner_hotkey[:12]}.. "
+                f"sent {len(sent_batch)}, got {len(tweet_batch)}"
             )
             self._miner_penalty.add_penalty(miner_hotkey, 1)
-            for tweet in tweet_batch:
+            for tweet in sent_batch:
                 try:
                     self._tweet_store.reset_to_unprocessed(tweet.id)
                 except Exception:
@@ -215,7 +226,7 @@ class Validator(BaseValidatorNeuron):
                         pass
                 return None
 
-            await self._handle_miner_batch_response(response_syn.tweet_batch, miner_hotkey)
+            await self._handle_miner_batch_response(response_syn.tweet_batch, miner_hotkey, miner_batch)
             return response_syn
         except Exception as e:
             bt.logging.error(f"[VALIDATION] Failed to process miner batch: {e}", exc_info=True)
