@@ -67,6 +67,9 @@ class TweetAnalysisBase(BaseModel):
     subnet_id: Optional[int] = Field(None, alias="subnetId")
     subnet_name: Optional[str] = Field(None, alias="subnetName")
     content_type: Optional[str] = Field(None, alias="contentType")
+    technical_quality: Optional[str] = Field(None, alias="technicalQuality")
+    market_analysis: Optional[str] = Field(None, alias="marketAnalysis")
+    impact_potential: Optional[str] = Field(None, alias="impactPotential")
     
     class Config:
         populate_by_name = True

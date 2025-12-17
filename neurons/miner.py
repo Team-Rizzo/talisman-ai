@@ -84,7 +84,10 @@ class Miner(BaseMinerNeuron):
                 sentiment=classification.sentiment.value,
                 subnet_id=classification.subnet_id,
                 subnet_name=classification.subnet_name,
-                content_type=classification.content_type.value
+                content_type=classification.content_type.value,
+                technical_quality=classification.technical_quality.value,
+                market_analysis=classification.market_analysis.value,
+                impact_potential=classification.impact_potential.value,
             )
         
         bt.logging.info(f"[Miner] Processed TweetBatch - returning enriched tweets")

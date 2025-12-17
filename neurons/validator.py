@@ -107,7 +107,9 @@ class Validator(BaseValidatorNeuron):
             return False
 
         # Validate by re-running analyzer on sampled posts.
-        is_valid, _result = await validate_miner_batch(tweet_batch, self._analyzer)
+        is_valid, _result = await asyncio.to_thread(
+            validate_miner_batch, tweet_batch, self._analyzer, 1
+        )
         if not is_valid:
             self._miner_penalty.add_penalty(miner_hotkey, 1)
             for tweet in tweet_batch:

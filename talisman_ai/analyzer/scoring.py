@@ -104,52 +104,41 @@ def value_score(
 def validate_miner_batch(
     miner_batch: List[TweetWithAuthor],
     analyzer: SubnetRelevanceAnalyzer,
-    sample_size: int = 10,
+    sample_size: int = 1,
     seed: int = None
 ) -> Tuple[bool, Dict]:
     """
-    Validate a miner's batch by sampling posts and checking for exact classification matches
+    Validate a miner's batch by sampling posts and checking classifications.
     
-    Validator Logic:
-    1. Sample N posts from miner's batch
-    2. Run LLM classification on each sampled post
-    3. Compare miner's canonical string vs validator's canonical string
-    4. If all match exactly → accept batch
-    5. If any deviate → reject batch
+    All fields require exact match:
+    subnet_id, sentiment, content_type, technical_quality, market_analysis, impact_potential
     
     Args:
-        miner_batch: List of TweetWithAuthor objects with keys:
-            - text: The post content
-            - author: Account object
+        miner_batch: List of TweetWithAuthor objects
         analyzer: SubnetRelevanceAnalyzer instance
-        sample_size: Number of posts to sample for validation (default: 10)
-        seed: Random seed for reproducible sampling (optional)
+        sample_size: Number of posts to sample (default: 1)
+        seed: Random seed for reproducible sampling
         
     Returns:
-        Tuple of (is_valid, result_dict):
-            - is_valid: True if all sampled posts match exactly, False otherwise
-            - result_dict: Contains 'matches', 'total_sampled', 'discrepancies'
+        Tuple of (is_valid, result_dict)
     """
-    
-    # Sample posts
     if seed is not None:
         random.seed(seed)
     
     sample_size = min(sample_size, len(miner_batch))
     sampled_posts = random.sample(miner_batch, sample_size)
     
-    bt.logging.info(f"[Validator] Sampling {sample_size} posts from batch of {len(miner_batch)}")
+    bt.logging.info(f"[Validator] Sampling {sample_size} post(s) from batch of {len(miner_batch)}")
     
     matches = 0
     discrepancies = []
     
     for i, post_data in enumerate(sampled_posts):
         post_text = post_data.text
-        
-        # Get miner's classification from the analysis field
         miner_analysis = post_data.analysis
+        
         if miner_analysis is None:
-            bt.logging.warning(f"[Validator] No miner classification for sampled post {i+1}")
+            bt.logging.warning(f"[Validator] No miner classification for post {i+1}")
             discrepancies.append({
                 "post_index": i,
                 "reason": "missing_miner_classification",
@@ -157,11 +146,9 @@ def validate_miner_batch(
             })
             continue
         
-        # Validator runs classification
         validator_result = analyzer.classify_post(post_text)
-        
         if validator_result is None:
-            bt.logging.warning(f"[Validator] Failed to classify sampled post {i+1}")
+            bt.logging.warning(f"[Validator] Failed to classify post {i+1}")
             discrepancies.append({
                 "post_index": i,
                 "reason": "validator_classification_failed",
@@ -169,47 +156,56 @@ def validate_miner_batch(
             })
             continue
         
-        # Compare key classification fields between miner's analysis and validator's result
-        # TweetAnalysis has: sentiment, subnet_id, subnet_name, content_type
-        miner_sentiment = miner_analysis.sentiment
-        miner_subnet_id = miner_analysis.subnet_id
-        miner_content_type = miner_analysis.content_type
+        # Extract miner fields
+        m_subnet = miner_analysis.subnet_id
+        m_sent = miner_analysis.sentiment
+        m_content = miner_analysis.content_type
+        m_tech = miner_analysis.technical_quality
+        m_market = miner_analysis.market_analysis
+        m_impact = miner_analysis.impact_potential
         
-        validator_sentiment = validator_result.sentiment.value if validator_result.sentiment else None
-        validator_subnet_id = validator_result.subnet_id
-        validator_content_type = validator_result.content_type.value if validator_result.content_type else None
+        # Extract validator fields
+        v_subnet = validator_result.subnet_id
+        v_sent = validator_result.sentiment.value if validator_result.sentiment else None
+        v_content = validator_result.content_type.value if validator_result.content_type else None
+        v_tech = validator_result.technical_quality.value if validator_result.technical_quality else None
+        v_market = validator_result.market_analysis.value if validator_result.market_analysis else None
+        v_impact = validator_result.impact_potential.value if validator_result.impact_potential else None
         
-        # Check if key fields match
-        fields_match = (
-            miner_sentiment == validator_sentiment and
-            miner_subnet_id == validator_subnet_id and
-            miner_content_type == validator_content_type
-        )
+        # Check matches (all exact)
+        subnet_ok = m_subnet == v_subnet
+        sentiment_ok = m_sent == v_sent
+        content_ok = m_content == v_content
+        tech_ok = m_tech == v_tech
+        market_ok = m_market == v_market
+        impact_ok = m_impact == v_impact
         
-        if fields_match:
+        all_ok = subnet_ok and sentiment_ok and content_ok and tech_ok and market_ok and impact_ok
+        
+        if all_ok:
             matches += 1
             bt.logging.debug(f"[Validator] Post {i+1}: MATCH")
         else:
             bt.logging.warning(f"[Validator] Post {i+1}: MISMATCH")
-            bt.logging.debug(f"  Miner:     subnet={miner_subnet_id}, sentiment={miner_sentiment}, content_type={miner_content_type}")
-            bt.logging.debug(f"  Validator: subnet={validator_subnet_id}, sentiment={validator_sentiment}, content_type={validator_content_type}")
             discrepancies.append({
                 "post_index": i,
                 "reason": "classification_mismatch",
-                "miner_classification": {
-                    "subnet_id": miner_subnet_id,
-                    "sentiment": miner_sentiment,
-                    "content_type": miner_content_type
+                "miner": {
+                    "subnet_id": m_subnet, "sentiment": m_sent, "content_type": m_content,
+                    "technical_quality": m_tech, "market_analysis": m_market, "impact_potential": m_impact
                 },
-                "validator_classification": {
-                    "subnet_id": validator_subnet_id,
-                    "sentiment": validator_sentiment,
-                    "content_type": validator_content_type
+                "validator": {
+                    "subnet_id": v_subnet, "sentiment": v_sent, "content_type": v_content,
+                    "technical_quality": v_tech, "market_analysis": v_market, "impact_potential": v_impact
+                },
+                "field_results": {
+                    "subnet_id": subnet_ok, "sentiment": sentiment_ok, "content_type": content_ok,
+                    "technical_quality": tech_ok, "market_analysis": market_ok, "impact_potential": impact_ok
                 },
                 "post_preview": post_text[:100] if post_text else ""
             })
     
-    is_valid = (matches == sample_size) and (len(discrepancies) == 0)
+    is_valid = matches == sample_size and len(discrepancies) == 0
     
     result = {
         "is_valid": is_valid,
