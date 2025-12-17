@@ -1,6 +1,6 @@
 # Validator Module
 
-The validator is responsible for independently verifying miner submissions and enforcing quality standards. Unlike traditional Bittensor validators that query miners directly, this validator polls a coordination API for validation payloads, validates them using LLM analysis, and submits results back to the API.
+The validator is responsible for independently verifying miner submissions and enforcing quality standards. Unlike traditional Bittensor validators that query miners directly, this validator polls a coordination API for tweets to process, validates miner responses, and submits completion back to the API.
 
 ## Overview
 
@@ -18,13 +18,10 @@ The validator runs asynchronously in the background, processing batches independ
 │                  Validator Neuron                           │
 │                                                             │
 │  ┌──────────────────┐    ┌──────────────┐    ┌──────────┐  │
-│  │ ValidationClient │──▶ |    Grader    │──▶│  Submit   │  │
-│  │                  │    │              │    │  Results  │  │
-│  │ - Polls /v2/    │    │ - LLM        │    │ - Updates │  │
-│  │   validation     │    │   analysis   │    │   scores  │  │
-│  │ - Fetches scores │    │   (tokens &   │    │           │  │
-│  │   from /v2/     │    │   sentiment)  │    │           │  │
-│  │   scores         │    │              │    │           │  │
+│  │ ValidationClient │──▶ | Miner Query  │──▶│  Submit   │  │
+│  │                  │    │ + Validate   │    │ Completed │  │
+│  │ - Polls API      │    │ - Sample     │    │ Tweets    │  │
+│  │   /tweets/*      │    │   check      │    │ to API    │  │
 │  └──────────────────┘    └──────────────┘    └──────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -38,19 +35,16 @@ The main validator neuron class that orchestrates batch processing and score man
 **Key Methods:**
 - `__init__()`: Initializes the validation client and analyzer
 - `forward()`: Starts the validation client on first invocation
-- `_on_validations()`: Processes validation payloads from API v2
-- `_process_single_validation()`: Grades a single post using LLM analysis
-- `_submit_pending_results()`: Submits validation results to /v2/validation_result
-- `_on_scores()`: Updates hotkey rewards based on scores from /v2/scores
+- `_on_tweets()`: Processes tweets polled from the API
+- `_process_miner_batch()`: Sends TweetBatch synapse to miners and tracks processing
+- `forward_tweets()`: Validates incoming TweetBatch synapses (axon handler)
 
 **Processing Flow:**
-1. ValidationClient polls /v2/validation and fetches validation payloads
-2. For each validation payload:
-   - Grades the post using `grade_hotkey()` (LLM analysis only - tokens and sentiment)
-   - X API validation is done on the API side before posts are sent to validators
-   - Collects results for batch submission
-3. Submits all results to /v2/validation_result
-4. Fetches scores from /v2/scores every N blocks and updates hotkey rewards
+1. ValidationClient polls the coordination API for tweets (`/tweets/unscored`)
+2. Validator batches tweets and queries miners using `TweetBatch` synapses
+3. Validator validates miner output (sample-check) and marks tweets processed
+4. Validator submits completion to the API (`/tweets/completed`)
+5. Validator aggregates rewards/penalties (local + broadcasts) and sets on-chain weights
 
 **Reward Logic:**
 - **VALID miners**: Receive full incentive score (`reward = final_score`)
@@ -58,13 +52,11 @@ The main validator neuron class that orchestrates batch processing and score man
 
 ### ValidationClient (`validation_client.py`)
 
-Client for API v2 validation system that handles fetching validations and scores.
+Client for the coordination API that handles fetching tweets to process and submitting completion.
 
 **Features:**
-- Polls `/v2/validation` endpoint for validation payloads
-- Submits results to `/v2/validation_result` endpoint
-- Fetches scores from `/v2/scores` every N blocks (configurable via `SCORES_BLOCK_INTERVAL`)
-- Tracks last processed scores window to avoid duplicates
+- Polls `/tweets/unscored` for tweets to process
+- Submits completion to `/tweets/completed`
 - Handles HTTP errors gracefully (logs warnings, continues polling)
 - Supports authentication via Bittensor wallet signatures
 
@@ -81,9 +73,9 @@ Each validation payload contains:
 - `post`: Post data to validate (content, tokens, sentiment, etc.)
 - `selected_at`: Timestamp when post was selected for validation
 
-### Grader (`grader.py`)
+### Validation (`analyzer/scoring.py`)
 
-Core validation logic that performs three-stage validation of miner posts.
+Core validation logic that validates miner batches by sampling and comparing classifications.
 
 **Validation Stages:**
 
@@ -151,9 +143,9 @@ Template reward function (not used in this subnet). Rewards are calculated in `_
    └─> If post passes:
        └─> Collect result (success=true)
    ↓
-4. Submit results to /v2/validation_result
+4. Submit completed tweets to `/tweets/completed`
    ↓
-5. Fetch scores from /v2/scores and update hotkey rewards
+5. Update rewards/penalties and set weights on-chain
 ```
 
 **Note:** X API validation (post existence, text/author/timestamp matching, metric inflation checks) is performed on the API side before posts are sent to validators. Validators only perform LLM-based analysis validation (tokens/relevance and sentiment).
@@ -175,42 +167,13 @@ All errors include:
 
 **Note:** X API validation errors (post not found, text/author/timestamp mismatches, metric inflation) are handled on the API side before posts are sent to validators.
 
-## Validation Result Submission
+## Completion Submission
 
-Validation results are submitted to the `/v2/validation_result` endpoint with the following format:
-
-```python
-{
-    "validator_hotkey": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
-    "results": [
-        {
-            "validation_id": "uuid-here",
-            "miner_hotkey": "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
-            "success": true,  # true if validation passed, false if failed
-            "failure_reason": {  # Only present if success=false
-                "code": "tokens_mismatch",
-                "message": "subnet relevance differs beyond tolerance",
-                "post_id": "1234567890",
-                "details": {...}
-            }
-        },
-        ...
-    ]
-}
-```
-
-**Note:** The `validator_hotkey` is included in the payload (not in each result), and each result includes `validation_id`, `miner_hotkey`, `success`, and optionally `failure_reason`.
-
-**Headers:**
-- `X-Auth-SS58Address`: Validator's hotkey address (SS58 format)
-- `X-Auth-Signature`: Signature of auth message
-- `X-Auth-Message`: Auth message (timestamp-based)
-- `X-Auth-Timestamp`: Timestamp used in auth message
-
-**Response Handling:**
-- Success: Logs response data
-- HTTP errors: Logs error, results are kept for retry
-- Other errors: Logs error with exception info
+Completed tweets are submitted to `/tweets/completed` with the validator authentication headers:
+- `X-Auth-SS58Address`
+- `X-Auth-Signature`
+- `X-Auth-Message`
+- `X-Auth-Timestamp`
 
 ## Configuration
 

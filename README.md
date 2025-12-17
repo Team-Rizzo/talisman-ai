@@ -48,14 +48,14 @@ A coordination API batches submissions and aggregates validator votes, only the 
 
 ## 🪬 How It Works
 
-### 🪬 Miner
+### 🪬 Miner (V3)
 
-- Scrapes posts from X/Twitter
-- Uses LLM to score:
-  - Subnet relevance (0.0–1.0)
-  - Sentiment (−1.0 to +1.0)
-- Calculates a weighted quality score using relevance, value, and recency
-- Submits results to the API
+- Receives TweetBatch requests from validators over the Bittensor network
+- Analyzes each tweet using LLM to determine:
+  - Subnet relevance (which subnet the tweet is about)
+  - Sentiment (very_bullish, bullish, neutral, bearish, very_bearish)
+  - Content type (technical_insight, announcement, etc.)
+- Returns enriched tweets with analysis data for validator verification
 
 ---
 
@@ -104,17 +104,24 @@ post_score = 0.50 × relevance + 0.40 × value + 0.10 × recency
 
 ---
 
-## 🪬 Architecture
+## 🪬 Architecture (V3)
 
 ```
 
-┌───────────┐       ┌──────────────┐        ┌──────────────┐
-│   Miner   │  ---> │ API Server   │  --->  │  Validator   │
-└───────────┘       │ batching     │        │ re-analysis  │
-^                   │ consensus    │        │ vote GOOD/BAD│
-|                   └──────────────┘        └─────┬────────┘
-|                                                 |
-└────────────────────── on-chain weights <────────┘
+┌──────────────┐        ┌───────────┐        ┌──────────────┐
+│ API Server   │  --->  │ Validator │  --->  │   Miner      │
+│ (queue)      │        │           │        │ (analysis)   │
+└──────────────┘        └─────┬─────┘        └──────┬───────┘
+                               │                     │
+                               │  TweetBatch         │
+                               │  (with analysis)    │
+                               │<────────────────────┘
+                               │
+                               v
+                        ┌──────────────┐
+                        │ Set Weights  │
+                        │  (on-chain)  │
+                        └──────────────┘
 
 ```
 
@@ -127,14 +134,11 @@ talisman_ai_subnet/
 ├── neurons/                    # Miner and validator nodes
 │   ├── miner.py               # Miner entry point
 │   ├── validator.py           # Validator entry point
-│   ├── analyzer/              # Analysis modules
-│   ├── user_miner/            # User miner components
 │   └── validator/             # Validator components
 └── talisman_ai/               # Core library
     ├── protocol.py            # Bittensor protocol definitions
     ├── config.py              # Configuration
     ├── analyzer/              # Analysis utilities
-    ├── user_miner/            # User miner logic
     ├── validator/             # Validator logic
     └── utils/                 # Utility functions
 
@@ -156,13 +160,8 @@ Copy `.miner_env_tmpl` to `.miner_env` and configure the following variables:
 | `MODEL` | LLM model identifier for analysis (e.g., `deepseek-ai/DeepSeek-V3-0324`) |
 | `API_KEY` | API key for the LLM service |
 | `LLM_BASE` | Base URL for the LLM API endpoint |
-| `X_BEARER_TOKEN` | X/Twitter API bearer token for authentication |
-| `X_API_BASE` | Base URL for X/Twitter API (default: `https://api.twitter.com/2`) |
-| `MINER_API_URL` | URL of the coordination API server (`https://talisman.rizzo.network/api`) |
-| `BATCH_HTTP_TIMEOUT` | HTTP timeout in seconds for API requests (default: `30.0`) |
-| `SCRAPE_INTERVAL_SECONDS` | Interval between scrape cycles in seconds (default: `300` = 5 minutes) |
-| `POSTS_PER_SCRAPE` | Number of posts to scrape per cycle |
-| `POSTS_TO_SUBMIT` | Number of posts to submit per cycle (should be ≤ `POSTS_PER_SCRAPE`) |
+
+**Note**: V3 miners do not need X/Twitter API credentials. They receive tweets from validators over the network.
 
 ### Validator Configuration (`.vali_env`)
 
@@ -193,7 +192,7 @@ Copy `.vali_env_tmpl` to `.vali_env` and configure the following variables:
 pip install -r requirements.txt
 pip install -e .
 cp .miner_env_tmpl .miner_env
-# edit .miner_env to include your LLM information and X_BEARER_TOKEN
+# edit .miner_env to include your LLM information (MODEL, API_KEY, LLM_BASE)
 python neurons/miner.py \
   --netuid 45 \
   --wallet.name your_coldkey_here \
@@ -209,7 +208,7 @@ python neurons/miner.py \
 pip install -r requirements.txt
 pip install -e .
 cp .vali_env_tmpl .vali_env
-# edit .vali_env to include your LLM information and X_BEARER_TOKEN
+# edit .vali_env to include your LLM information (MODEL, API_KEY, LLM_BASE)
 python3 scripts/start_validator.py
     --netuid 45
     --subtensor.network <finney/local/test>

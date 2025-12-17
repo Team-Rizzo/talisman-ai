@@ -23,9 +23,9 @@ async def forward(self):
     """
     The forward function is called by the validator every time step.
     
-    Note: This subnet uses API v2 validation system, so the actual validation
-    work is done by the ValidationClient running in the background. This function
-    just sleeps to keep the forward loop running.
+    Note: This subnet does its work in the background (polling the coordination API,
+    querying miners, and updating rewards). This function just sleeps to keep the
+    forward loop running.
     
     Args:
         self (:obj:`bittensor.neuron.Neuron`): The neuron object which contains all the necessary state for the validator.

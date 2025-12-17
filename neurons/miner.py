@@ -7,30 +7,28 @@ import talisman_ai
 
 # import base miner class which takes care of most of the boilerplate
 from talisman_ai.base.miner import BaseMinerNeuron
-
-# import user miner implementation
-from talisman_ai.user_miner.my_miner import MyMiner
+from talisman_ai.analyzer import setup_analyzer
+from talisman_ai.utils.api_models import TweetAnalysisBase
 
 
 class Miner(BaseMinerNeuron):
     """
-    Your miner neuron class. You should use this class to define your miner's behavior. In particular, you should replace the forward function with your own logic. You may also want to override the blacklist and priority functions according to your needs.
-
-    This class inherits from the BaseMinerNeuron class, which in turn inherits from BaseNeuron. The BaseNeuron class takes care of routine tasks such as setting up wallet, subtensor, metagraph, logging directory, parsing config, etc. You can override any of the methods in BaseNeuron if you need to customize the behavior.
-
-    This class provides reasonable default behavior for a miner such as blacklisting unrecognized hotkeys, prioritizing requests based on stake, and forwarding requests to the forward function. If you need to define custom
+    V3 Miner: Processes TweetBatch requests from validators.
+    
+    The miner receives batches of tweets from validators, analyzes each tweet
+    for subnet relevance and sentiment, and returns the enriched batch.
     """
 
     def __init__(self, config=None):
         super(Miner, self).__init__(config=config)
 
-        # Initialize the user miner (runs in background thread)
-        # Pass the hotkey, wallet, and subtensor for authentication and block tracking
-        hotkey = self.wallet.hotkey.ss58_address
-        self.my_miner = MyMiner(hotkey=hotkey, wallet=self.wallet, subtensor=self.subtensor)
-        self.my_miner.start()
+        # Initialize analyzer for tweet classification
+        bt.logging.info("[Miner] Initializing analyzer...")
+        self.analyzer = setup_analyzer()
+        bt.logging.info("[Miner] Analyzer initialized")
         
-        bt.logging.info(f"User miner started with hotkey: {hotkey}")
+        hotkey = self.wallet.hotkey.ss58_address
+        bt.logging.info(f"[Miner] V3 miner started with hotkey: {hotkey}")
     
     async def forward_is_alive(self, synapse: talisman_ai.protocol.IsAlive) -> talisman_ai.protocol.IsAlive:
         """
@@ -41,7 +39,7 @@ class Miner(BaseMinerNeuron):
     
     async def forward(self, synapse: bt.Synapse) -> bt.Synapse:
         """
-        Processes incoming synapses. This method should be implemented with your custom logic.
+        Processes incoming synapses. Routes TweetBatch requests to forward_tweets.
         
         Args:
             synapse (bt.Synapse): The incoming synapse request.
@@ -49,8 +47,47 @@ class Miner(BaseMinerNeuron):
         Returns:
             bt.Synapse: The processed synapse response.
         """
-        # TODO(developer): Implement your custom synapse processing logic here
+        if isinstance(synapse, talisman_ai.protocol.TweetBatch):
+            return await self.forward_tweets(synapse)
+        
         bt.logging.warning(f"Received synapse type: {type(synapse).__name__}, but no handler implemented")
+        return synapse
+
+    async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
+        """
+        Processes TweetBatch requests from validators.
+        
+        Analyzes each tweet in the batch and enriches it with classification data.
+        
+        Args:
+            synapse: TweetBatch containing list of tweets to analyze
+            
+        Returns:
+            TweetBatch with enriched tweets (analysis field populated)
+        """
+        bt.logging.info(f"[Miner] Received TweetBatch with {len(synapse.tweet_batch)} tweet(s)")
+        
+        for tweet in synapse.tweet_batch:
+            if not tweet.text:
+                bt.logging.warning(f"[Miner] Skipping tweet {tweet.id} - no text content")
+                continue
+            
+            # Classify the tweet
+            classification = self.analyzer.classify_post(tweet.text)
+            
+            if classification is None:
+                bt.logging.warning(f"[Miner] Failed to classify tweet {tweet.id}")
+                continue
+            
+            # Create analysis object with required fields for validator
+            tweet.analysis = TweetAnalysisBase(
+                sentiment=classification.sentiment.value,
+                subnet_id=classification.subnet_id,
+                subnet_name=classification.subnet_name,
+                content_type=classification.content_type.value
+            )
+        
+        bt.logging.info(f"[Miner] Processed TweetBatch - returning enriched tweets")
         return synapse
 
 
@@ -209,8 +246,6 @@ class Miner(BaseMinerNeuron):
 
     def __exit__(self, exc_type, exc_value, traceback):
         """Clean up when miner exits."""
-        if hasattr(self, 'my_miner'):
-            self.my_miner.stop()
         super().__exit__(exc_type, exc_value, traceback)
         return False
 

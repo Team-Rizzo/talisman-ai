@@ -71,21 +71,7 @@ X_API_SOURCE = os.getenv("X_API_SOURCE", "x_api")
 # Miner-Specific Configuration
 # ============================================================================
 
-# Scraping configuration
-# DEPRECATED: These are no longer used with block-based scraping approach.
-# The miner now uses BLOCKS_PER_WINDOW and MAX_SUBMISSIONS_PER_WINDOW instead.
-# Keeping these for backward compatibility but they have no effect.
-SCRAPE_INTERVAL_SECONDS = int(os.getenv("SCRAPE_INTERVAL_SECONDS", "300"))  # Unused - block-based now
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))  # Unused - count parameter used instead
-POSTS_PER_SCRAPE = int(os.getenv("POSTS_PER_SCRAPE", "1"))  # Unused - posts_per_window used instead
-POSTS_TO_SUBMIT = int(os.getenv("POSTS_TO_SUBMIT", "1"))  # Unused - all scraped posts are submitted
-
-# API v2 rate limit configuration
-# Maximum submissions per block window (default: 5, matches API v2 default)
-# Must match MAX_SUBMISSION_RATE in api_v2 if using API v2
-MAX_SUBMISSIONS_PER_WINDOW = int(os.getenv("MAX_SUBMISSIONS_PER_WINDOW", os.getenv("MAX_SUBMISSION_RATE", "5")))
-# Blocks per window (default: 100 blocks, ~20 minutes at 12s per block)
-BLOCKS_PER_WINDOW = int(os.getenv("BLOCKS_PER_WINDOW", "100"))
+# V3 miners process TweetBatch requests from validators - no scraping/submission config needed
 
 
 # ============================================================================
