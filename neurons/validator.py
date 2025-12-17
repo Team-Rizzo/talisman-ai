@@ -14,7 +14,7 @@ from talisman_ai.validator.grader import grade_hotkey, CONSENSUS_VALID, CONSENSU
 from talisman_ai.analyzer import setup_analyzer
 import talisman_ai.protocol
 from talisman_ai import config
-from talisman_ai.utils.api_models import TweetWithUser, CompletedTweetSubmission   
+from talisman_ai.utils.api_models import TweetWithAuthor, CompletedTweetSubmission   
 from talisman_ai.protocol import TweetBatch
 from talisman_ai.utils.uids import get_random_uids
 from talisman_ai.utils.tweet_store import TweetStore
@@ -89,7 +89,7 @@ class Validator(BaseValidatorNeuron):
             self._miner_reward.add_reward(synapse.dendrite.hotkey, 1)
         return synapse
         
-    async def _on_tweets(self, tweets: List[TweetWithUser]):
+    async def _on_tweets(self, tweets: List[TweetWithAuthor]):
         """
         Process multiple validation payloads in batch (sequentially).
         
@@ -106,8 +106,8 @@ class Validator(BaseValidatorNeuron):
         results = []
         validation_results_by_hotkey = {}  # Group validation results by hotkey for batching
         miner_batches = []  
-        for i in range(0, len(tweets.tweets), config.MINER_BATCH_SIZE):
-            miner_batches.append(tweets.tweets[i:i + config.MINER_BATCH_SIZE])
+        for i in range(0, len(tweets), config.MINER_BATCH_SIZE):
+            miner_batches.append(tweets[i:i + config.MINER_BATCH_SIZE])
         uids = get_random_uids(self.metagraph, self.dendrite, k=len(miner_batches), is_alive=True)
 
         for miner_batch, uid in zip(miner_batches, uids):
@@ -115,7 +115,7 @@ class Validator(BaseValidatorNeuron):
             
     async def _process_miner_batch( 
         self, 
-        miner_batch: List[TweetWithUser],
+        miner_batch: List[TweetWithAuthor],
         uid: int
     ) -> TweetBatch:
         """
@@ -150,13 +150,15 @@ class Validator(BaseValidatorNeuron):
             bt.logging.error(f"[VALIDATION] Failed to process miner batch: {e}", exc_info=True)
             return None
     
-    async def _submit_tweet_batch(self, tweet_batch: List[TweetWithUser]):
+    async def _submit_tweet_batch(self, tweet_batch: List[TweetWithAuthor]):
         """Submit a tweet batch to the API"""
         completed_tweets = []
         for tweet in tweet_batch:
+            # Get sentiment from analysis if available, otherwise default to neutral
+            sentiment = tweet.analysis.sentiment if tweet.analysis and tweet.analysis.sentiment else "neutral"
             completed_tweets.append(CompletedTweetSubmission(
                 tweet_id=tweet.id,
-                sentiment=tweet.sentiment
+                sentiment=sentiment
             ))
         response = await self._validation_client.api_client.submit_completed_tweets(completed_tweets)
         return response

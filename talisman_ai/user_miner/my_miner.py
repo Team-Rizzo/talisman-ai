@@ -23,6 +23,7 @@ from talisman_ai.user_miner.post_scraper import PostScraper
 from talisman_ai.analyzer import setup_analyzer
 from talisman_ai.analyzer.scoring import score_post_entry
 from talisman_ai.utils.normalization import norm_text
+from talisman_ai.utils.api_models import TweetWithAuthor, Account
 
 class MyMiner:
     """
@@ -368,26 +369,36 @@ class MyMiner:
                         post_date = post.get("timestamp", 0)
                         if isinstance(post_date, int):
                             dt = datetime.fromtimestamp(post_date, tz=timezone.utc)
-                            post_date_iso = dt.isoformat()
                         else:
-                            post_date_iso = datetime.now(timezone.utc).isoformat()
+                            dt = datetime.now(timezone.utc)
                         
-                        post_entry = {
-                            "url": f"post_{pid}",
-                            "post_info": {
-                                "post_text": content,
-                                "post_date": post_date_iso,
-                                "like_count": int(post.get("likes", 0) or 0),
-                                "retweet_count": int(post.get("retweets", 0) or 0),
-                                "quote_count": 0,
-                                "reply_count": int(post.get("responses", 0) or 0),
-                                "author_followers": int(post.get("followers", 0) or 0),
-                                "account_age_days": int(post.get("account_age", 0)),
-                            }
-                        }
+                        # Create Account object for author info
+                        author_account = Account(
+                            id=0,  # Unknown author ID
+                            screen_name=str(post.get("author", "unknown")),
+                            followers_count=int(post.get("followers", 0) or 0),
+                            following_count=0,
+                            statuses_count=0,
+                        )
+                        
+                        # Create TweetWithAuthor object for scoring
+                        tweet_for_scoring = TweetWithAuthor(
+                            id=int(pid) if pid.isdigit() else 0,
+                            url=f"post_{pid}",
+                            text=content,
+                            created_at=dt,
+                            received_at=datetime.now(timezone.utc),
+                            like_count=int(post.get("likes", 0) or 0),
+                            retweet_count=int(post.get("retweets", 0) or 0),
+                            quote_count=0,
+                            reply_count=int(post.get("responses", 0) or 0),
+                            author=author_account,
+                        )
                         
                         try:
-                            scored_result = score_post_entry(post_entry, self.analyzer, k=5, analysis_result=analysis)
+                            # Pass the classification object from analysis result
+                            classification = analysis.get("classification") if isinstance(analysis, dict) else None
+                            scored_result = score_post_entry(tweet_for_scoring, self.analyzer, k=5, analysis_result=classification)
                             post_score = scored_result.get("score", 0.0)
                             bt.logging.info(f"[MyMiner] Calculated score for {pid}: {post_score:.3f}")
                         except Exception as e:

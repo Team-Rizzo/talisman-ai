@@ -8,7 +8,7 @@ import random
 
 from talisman_ai import config
 from talisman_ai.utils.api_client import TalismanAPIClient
-from talisman_ai.utils.api_models import TweetWithUser
+from talisman_ai.utils.api_models import TweetWithAuthor
 from talisman_ai.utils.tweet_store import TweetStore
 from talisman_ai.utils.reward import MinerReward
 from talisman_ai.utils.penalty import MinerPenalty
@@ -58,7 +58,7 @@ class ValidationClient:
 
     async def run(
         self,
-        on_tweets: Callable[[TweetWithUser], Any],
+        on_tweets: Callable[[List[TweetWithAuthor]], Any],
     ):
         """
         Main validation loop.
@@ -90,10 +90,9 @@ class ValidationClient:
                     continue
 
                 if unscored_tweets:
-                    for tweet in unscored_tweets:
-                        maybe_coro = on_tweets(tweet)
-                        if asyncio.iscoroutine(maybe_coro):
-                            await maybe_coro
+                    maybe_coro = on_tweets(unscored_tweets)
+                    if asyncio.iscoroutine(maybe_coro):
+                        await maybe_coro
                 
                 processed_tweets = self._validator._tweet_store.get_processed_tweets()
                 for tweet in processed_tweets:

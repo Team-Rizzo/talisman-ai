@@ -22,7 +22,7 @@ Usage:
     
     # Submit completed tweets
     await client.submit_completed_tweets([
-        {"tweet_id": "abc123", "sentiment": "positive"},
+        {"tweet_id": 123456789, "sentiment": "bullish"},
     ])
     
     # Submit rewards
@@ -39,8 +39,8 @@ from dataclasses import dataclass
 import httpx
 import bittensor as bt
 
-from api_models import (
-    TweetWithUser, User,
+from talisman_ai.utils.api_models import (
+    TweetWithAuthor, Account, TweetAnalysis,
     Penalty, PenaltyCreate,
     Reward, RewardCreate,
     BlacklistedHotkey,
@@ -281,7 +281,7 @@ class TalismanAPIClient:
     # Tweet Methods
     # =========================================================================
     
-    async def get_unscored_tweets(self, limit: int = 3) -> List[TweetWithUser]:
+    async def get_unscored_tweets(self, limit: int = 3) -> List[TweetWithAuthor]:
         """
         Get tweets that haven't been scored yet.
         
@@ -292,36 +292,40 @@ class TalismanAPIClient:
             limit: Maximum number of tweets to return (default: 3)
             
         Returns:
-            List of TweetWithUser
+            List of TweetWithAuthor objects
         """
         data = await self._request("GET", "/tweets/unscored", params={"limit": limit})
         
         tweets = []
         for tweet_data in data.get("tweets", []):
-            user_data = tweet_data.pop("user", {})
-            user = User(**user_data)
-            tweet = TweetWithUser(**tweet_data, user=user)
+            author_data = tweet_data.pop("author", None)
+            analysis_data = tweet_data.pop("analysis", None)
+            
+            author = Account(**author_data) if author_data else None
+            analysis = TweetAnalysis(**analysis_data) if analysis_data else None
+            
+            tweet = TweetWithAuthor(**tweet_data, author=author, analysis=analysis)
             tweets.append(tweet)
         
         return tweets
     
     async def submit_completed_tweets(
         self,
-        completed_tweets: List[Union[CompletedTweetSubmission, Dict[str, str]]],
+        completed_tweets: List[Union[CompletedTweetSubmission, Dict[str, Any]]],
     ) -> SubmissionResponse:
         """
         Submit completed scored tweets.
         
         Args:
-            completed_tweets: List of completed tweets with tweet_id and sentiment
+            completed_tweets: List of completed tweets with tweet_id (int) and sentiment
             
         Returns:
             SubmissionResponse with success status
             
         Example:
             await client.submit_completed_tweets([
-                {"tweet_id": "abc123", "sentiment": "positive"},
-                {"tweet_id": "def456", "sentiment": "negative"},
+                {"tweet_id": 123456789, "sentiment": "bullish"},
+                {"tweet_id": 987654321, "sentiment": "bearish"},
             ])
         """
         # Convert dicts to CompletedTweetSubmission if needed
@@ -486,23 +490,29 @@ class TalismanAPIClient:
     async def add_blacklisted_hotkeys(
         self,
         hotkeys: List[str],
+        reason: Optional[str] = None,
     ) -> SubmissionResponse:
         """
         Add hotkeys to the blacklist.
         
         Args:
             hotkeys: List of hotkey SS58 addresses to blacklist
+            reason: Optional reason for blacklisting
             
         Returns:
             SubmissionResponse with success status
             
         Example:
-            await client.add_blacklisted_hotkeys(["5xxx...", "5yyy..."])
+            await client.add_blacklisted_hotkeys(["5xxx...", "5yyy..."], reason="Spam")
         """
+        payload = {"hotkeys": hotkeys}
+        if reason:
+            payload["reason"] = reason
+        
         data = await self._request(
             "POST",
             "/blacklist",
-            json={"hotkeys": hotkeys},
+            json=payload,
         )
         
         return SubmissionResponse(**data)
@@ -538,7 +548,7 @@ class TalismanAPIClientSync:
         client = TalismanAPIClientSync("http://localhost:8000", wallet)
         
         tweets = client.get_unscored_tweets(limit=3)
-        client.submit_completed_tweets([{"tweet_id": "abc", "sentiment": "positive"}])
+        client.submit_completed_tweets([{"tweet_id": 123, "sentiment": "bullish"}])
     """
     
     def __init__(
@@ -582,13 +592,13 @@ class TalismanAPIClientSync:
         """Check if the API is healthy."""
         return self._run(self._async_client.health_check())
     
-    def get_unscored_tweets(self, limit: int = 3) -> TweetsForScoringResponse:
+    def get_unscored_tweets(self, limit: int = 3) -> List[TweetWithAuthor]:
         """Get tweets that haven't been scored yet."""
         return self._run(self._async_client.get_unscored_tweets(limit))
     
     def submit_completed_tweets(
         self,
-        completed_tweets: List[Union[CompletedTweetSubmission, Dict[str, str]]],
+        completed_tweets: List[Union[CompletedTweetSubmission, Dict[str, Any]]],
     ) -> SubmissionResponse:
         """Submit completed scored tweets."""
         return self._run(self._async_client.submit_completed_tweets(completed_tweets))
@@ -627,9 +637,13 @@ class TalismanAPIClientSync:
         """Get all blacklisted hotkeys."""
         return self._run(self._async_client.get_blacklisted_hotkeys())
     
-    def add_blacklisted_hotkeys(self, hotkeys: List[str]) -> SubmissionResponse:
+    def add_blacklisted_hotkeys(
+        self,
+        hotkeys: List[str],
+        reason: Optional[str] = None,
+    ) -> SubmissionResponse:
         """Add hotkeys to the blacklist."""
-        return self._run(self._async_client.add_blacklisted_hotkeys(hotkeys))
+        return self._run(self._async_client.add_blacklisted_hotkeys(hotkeys, reason))
     
     def remove_blacklisted_hotkey(self, hotkey: str) -> SubmissionResponse:
         """Remove a hotkey from the blacklist."""
@@ -660,16 +674,17 @@ if __name__ == "__main__":
             
             # Get unscored tweets
             print("\nGetting unscored tweets...")
-            response = await client.get_unscored_tweets(limit=3)
-            print(f"Got {response.count} tweets:")
-            for tweet in response.tweets:
-                print(f"  - {tweet.id}: {tweet.text[:50]}...")
+            tweets = await client.get_unscored_tweets(limit=3)
+            print(f"Got {len(tweets)} tweets:")
+            for tweet in tweets:
+                text_preview = (tweet.text[:50] + "...") if tweet.text and len(tweet.text) > 50 else tweet.text
+                print(f"  - {tweet.id}: {text_preview}")
             
             # Example: Submit completed tweets (uncomment to use)
-            # if response.tweets:
+            # if tweets:
             #     completed = [
-            #         {"tweet_id": tweet.id, "sentiment": "positive"}
-            #         for tweet in response.tweets
+            #         {"tweet_id": tweet.id, "sentiment": "bullish"}
+            #         for tweet in tweets
             #     ]
             #     result = await client.submit_completed_tweets(completed)
             #     print(f"Submitted: {result.message}")
@@ -681,4 +696,3 @@ if __name__ == "__main__":
     
     # Run the example
     asyncio.run(main())
-

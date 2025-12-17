@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple
 import random
 import bittensor as bt
 
-from talisman_ai.utils.api_models import TweetWithUser
+from talisman_ai.utils.api_models import TweetWithAuthor
 from .relevance import SubnetRelevanceAnalyzer, PostClassification
 
 
@@ -69,7 +69,7 @@ def recency_score(post_date_iso: str, horizon_hours: float = 24.0) -> float:
 
 
 def value_score(
-    post_info: TweetWithUser,
+    post_info: TweetWithAuthor,
     caps: Dict = CAPS,
 ) -> float:
     """
@@ -80,19 +80,21 @@ def value_score(
     5. Author credibility (follower count)
     
     Args:
-        post_info: TweetWithUser object
+        post_info: TweetWithAuthor object
         caps: Dictionary of cap values for normalization (defaults to CAPS)
         
     Returns:
         Value score in [0.0, 1.0]
     """
+    # Get followers count from author if available
+    followers = post_info.author.followers_count if post_info.author else 0
     comps = [
         _norm(post_info.like_count or 0, caps["likes"]),
         _norm(post_info.retweet_count or 0, caps["retweets"]),
         _norm(post_info.quote_count or 0, caps["quotes"]),
         _norm(post_info.reply_count or 0, caps["replies"]),
-        _norm(post_info.user.followers or 0, caps["followers"]),
-        # _norm(post_info.user.account_age_days or 0, caps["account_age_days"]),  # Excluded for now
+        _norm(followers or 0, caps["followers"]),
+        # _norm(post_info.author.account_age_days or 0, caps["account_age_days"]),  # Excluded for now
     ]
     return sum(comps) / len(comps)
 
@@ -100,7 +102,7 @@ def value_score(
 # ===== Validator Batch Verification =====
 
 def validate_miner_batch(
-    miner_batch: List[TweetWithUser],
+    miner_batch: List[TweetWithAuthor],
     analyzer: SubnetRelevanceAnalyzer,
     sample_size: int = 10,
     seed: int = None
@@ -116,9 +118,9 @@ def validate_miner_batch(
     5. If any deviate → reject batch
     
     Args:
-        miner_batch: List of TweetWithUser objects with keys:
+        miner_batch: List of TweetWithAuthor objects with keys:
             - text: The post content
-            - user: User object
+            - author: Account object
         analyzer: SubnetRelevanceAnalyzer instance
         sample_size: Number of posts to sample for validation (default: 10)
         seed: Random seed for reproducible sampling (optional)
@@ -141,9 +143,19 @@ def validate_miner_batch(
     matches = 0
     discrepancies = []
     
-    for i, post_data in enumerate[TweetWithUser](sampled_posts):
+    for i, post_data in enumerate(sampled_posts):
         post_text = post_data.text
-        miner_classification = post_data.get("miner_classification", {})
+        
+        # Get miner's classification from the analysis field
+        miner_analysis = post_data.analysis
+        if miner_analysis is None:
+            bt.logging.warning(f"[Validator] No miner classification for sampled post {i+1}")
+            discrepancies.append({
+                "post_index": i,
+                "reason": "missing_miner_classification",
+                "post_preview": post_text[:100] if post_text else ""
+            })
+            continue
         
         # Validator runs classification
         validator_result = analyzer.classify_post(post_text)
@@ -153,39 +165,48 @@ def validate_miner_batch(
             discrepancies.append({
                 "post_index": i,
                 "reason": "validator_classification_failed",
-                "post_preview": post_text[:100]
+                "post_preview": post_text[:100] if post_text else ""
             })
             continue
         
-        # Build miner's canonical string from their claimed classification
-        try:
-            miner_canonical = _build_canonical_from_dict(miner_classification)
-        except Exception as e:
-            bt.logging.warning(f"[Validator] Invalid miner classification format: {e}")
-            discrepancies.append({
-                "post_index": i,
-                "reason": "invalid_miner_format",
-                "error": str(e)
-            })
-            continue
+        # Compare key classification fields between miner's analysis and validator's result
+        # TweetAnalysis has: sentiment, subnet_id, subnet_name, content_type
+        miner_sentiment = miner_analysis.sentiment
+        miner_subnet_id = miner_analysis.subnet_id
+        miner_content_type = miner_analysis.content_type
         
-        # Get validator's canonical string
-        validator_canonical = validator_result.to_canonical_string()
+        validator_sentiment = validator_result.sentiment.value if validator_result.sentiment else None
+        validator_subnet_id = validator_result.subnet_id
+        validator_content_type = validator_result.content_type.value if validator_result.content_type else None
         
-        # Exact match check
-        if miner_canonical == validator_canonical:
+        # Check if key fields match
+        fields_match = (
+            miner_sentiment == validator_sentiment and
+            miner_subnet_id == validator_subnet_id and
+            miner_content_type == validator_content_type
+        )
+        
+        if fields_match:
             matches += 1
             bt.logging.debug(f"[Validator] Post {i+1}: MATCH")
         else:
             bt.logging.warning(f"[Validator] Post {i+1}: MISMATCH")
-            bt.logging.debug(f"  Miner:     {miner_canonical}")
-            bt.logging.debug(f"  Validator: {validator_canonical}")
+            bt.logging.debug(f"  Miner:     subnet={miner_subnet_id}, sentiment={miner_sentiment}, content_type={miner_content_type}")
+            bt.logging.debug(f"  Validator: subnet={validator_subnet_id}, sentiment={validator_sentiment}, content_type={validator_content_type}")
             discrepancies.append({
                 "post_index": i,
-                "reason": "canonical_mismatch",
-                "miner_canonical": miner_canonical,
-                "validator_canonical": validator_canonical,
-                "post_preview": post_text[:100]
+                "reason": "classification_mismatch",
+                "miner_classification": {
+                    "subnet_id": miner_subnet_id,
+                    "sentiment": miner_sentiment,
+                    "content_type": miner_content_type
+                },
+                "validator_classification": {
+                    "subnet_id": validator_subnet_id,
+                    "sentiment": validator_sentiment,
+                    "content_type": validator_content_type
+                },
+                "post_preview": post_text[:100] if post_text else ""
             })
     
     is_valid = (matches == sample_size) and (len(discrepancies) == 0)
@@ -246,7 +267,7 @@ RECENCY_WEIGHT = 0.10    # 10% weight on recency
 
 def compute_post_score(
     classification: PostClassification,
-    post_info: TweetWithUser,
+    post_info: TweetWithAuthor,
     weights: Dict = None
 ) -> float:
     """
@@ -254,7 +275,7 @@ def compute_post_score(
     
     Args:
         classification: PostClassification result
-        post_info: TweetWithUser object
+        post_info: TweetWithAuthor object
         weights: Optional custom weights dict
         
     Returns:
@@ -345,7 +366,7 @@ def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_resu
     return 1.0, [(subnet_name, classification_data)]  # Binary: matched or not
 
 
-def score_post_entry(entry: TweetWithUser, analyzer, k: int = 5, analysis_result: PostClassification = None) -> Dict:
+def score_post_entry(entry: TweetWithAuthor, analyzer, k: int = 5, analysis_result: PostClassification = None) -> Dict:
     """
     Score a single post entry with rich classification data preserved.
     
@@ -353,7 +374,7 @@ def score_post_entry(entry: TweetWithUser, analyzer, k: int = 5, analysis_result
     consumers can use the rich categorical data for database storage, analytics, etc.
     
     Args:
-        entry: TweetWithUser object
+        entry: TweetWithAuthor object
         analyzer: SubnetRelevanceAnalyzer instance
         k: Kept for API compatibility (not used anymore - we return 1 subnet or none)
         analysis_result: Optional pre-computed analysis result dict

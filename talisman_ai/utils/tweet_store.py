@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Optional
 from talisman_ai import config
-from talisman_ai.utils.api_models import TweetWithUser
+from talisman_ai.utils.api_models import TweetWithAuthor
 from pydantic import BaseModel
 from typing import List
 class TweetStatus(Enum):
@@ -13,31 +13,31 @@ class TweetStatus(Enum):
     PROCESSED = "Processed"
 
 class TweetStoreItem(BaseModel):
-    tweet: TweetWithUser
+    tweet: TweetWithAuthor
     status: TweetStatus
     start_time: Optional[float] = None
     hotkey: Optional[str] = None
 
 class TweetStore:
     def __init__(self):
-        # key: tweet_id, value: dict with 'tweet' (TweetWithUser), 'status', 'start_time', 'hotkey'
+        # key: tweet_id, value: dict with 'tweet' (TweetWithAuthor), 'status', 'start_time', 'hotkey'
         self._tweets = {}
 
-    def add_tweet(self, tweet: TweetWithUser, tweet_id: Optional[str] = None, hotkey: Optional[str] = None, set_as_processing: bool = True):
+    def add_tweet(self, tweet: TweetWithAuthor, tweet_id: Optional[str] = None, hotkey: Optional[str] = None, set_as_processing: bool = True):
         """
         Adds a tweet to the store as Unprocessed.
         If tweet_id is provided, uses it as the key; else uses tweet.id.
         
         Args:
-            tweet: TweetWithUser object to store
+            tweet: TweetWithAuthor object to store
             tweet_id: Optional tweet ID. If not provided, uses tweet.id
             hotkey: Optional miner hotkey processing this tweet
         """
         if tweet_id is None:
             tweet_id = tweet.id
-        # Ensure tweet is a TweetWithUser instance
-        if not isinstance(tweet, TweetWithUser):
-            raise TypeError(f"tweet must be a TweetWithUser instance, got {type(tweet)}")
+        # Ensure tweet is a TweetWithAuthor instance
+        if not isinstance(tweet, TweetWithAuthor):
+            raise TypeError(f"tweet must be a TweetWithAuthor instance, got {type(tweet)}")
         self._tweets[tweet_id] = TweetStoreItem(
             tweet=tweet, 
             status=TweetStatus.PROCESSING if set_as_processing else TweetStatus.UNPROCESSED, 
@@ -80,12 +80,12 @@ class TweetStore:
         else:
             raise KeyError(f"Tweet ID {tweet_id} not found")
 
-    def get_tweet(self, tweet_id) -> TweetWithUser:
+    def get_tweet(self, tweet_id) -> TweetWithAuthor:
         """
         Returns the stored tweet object.
         
         Returns:
-            TweetWithUser: The stored tweet object
+            TweetWithAuthor: The stored tweet object
         """
         if tweet_id in self._tweets:
             return self._tweets[tweet_id].tweet
@@ -215,7 +215,7 @@ class TweetStore:
         }
         
         for tweet_id, tweet_info in self._tweets.items():
-            # Serialize TweetWithUser to dict, then add status, start_time, and hotkey
+            # Serialize TweetWithAuthor to dict, then add status, start_time, and hotkey
             data["tweets"][tweet_id] = tweet_info.model_dump(mode='json')
         
         # Write to file
@@ -248,8 +248,8 @@ class TweetStore:
         
         # Deserialize tweets
         for tweet_id, tweet_info in data.get("tweets", {}).items():
-            # Reconstruct TweetWithUser from dict
-            tweet = TweetWithUser.model_validate(tweet_info["tweet"])
+            # Reconstruct TweetWithAuthor from dict
+            tweet = TweetWithAuthor.model_validate(tweet_info["tweet"])
             # Reconstruct status enum
             status = TweetStatus(tweet_info["status"])
             start_time = tweet_info.get("start_time")

@@ -20,7 +20,7 @@
 import bittensor as bt
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
-from talisman_ai.utils.api_models import TweetWithUser
+from talisman_ai.utils.api_models import TweetWithAuthor
 
 class Score(bt.Synapse):
     """
@@ -51,7 +51,7 @@ class TweetBatch(bt.Synapse):
     """
     Synapse for sending tweet batch from miner to validator.
     """
-    tweet_batch: List[TweetWithUser] 
+    tweet_batch: List[TweetWithAuthor] 
 
 
 class ValidatorRewards(bt.Synapse):

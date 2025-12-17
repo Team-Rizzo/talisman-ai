@@ -6,39 +6,90 @@ request/response validation and serialization.
 """
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Any
 from pydantic import BaseModel, Field
 
 
 # ============================================================================
-# User Models
+# Account Models (Twitter/X user accounts)
 # ============================================================================
 
-class UserBase(BaseModel):
-    """Base user model with common fields."""
-    id: str
-    username: str
+class AccountBase(BaseModel):
+    """Base account model with common fields."""
+    id: int  # BigInt in Prisma
+    name: Optional[str] = None
     screen_name: str = Field(alias="screenName")
-    following_count: int = 0
-    followers_count: int = 0
-    account_age_days: int = 0
+    user_name: Optional[str] = Field(None, alias="userName")
+    location: Optional[str] = None
+    description: Optional[str] = None
+    verified: bool = False
+    is_blue_verified: bool = Field(False, alias="isBlueVerified")
+    followers_count: int = Field(0, alias="followersCount")
+    following_count: int = Field(0, alias="followingCount")
+    statuses_count: int = Field(0, alias="statusesCount")
+    profile_image_url: Optional[str] = Field(None, alias="profileImageUrl")
     
     class Config:
         populate_by_name = True
 
 
-class UserCreate(BaseModel):
-    """Model for creating a new user."""
-    id: str
-    username: str
+class AccountCreate(BaseModel):
+    """Model for creating a new account."""
+    id: int
     screen_name: str
-    following_count: int = 0
+    name: Optional[str] = None
+    user_name: Optional[str] = None
+    location: Optional[str] = None
+    description: Optional[str] = None
+    verified: bool = False
+    is_blue_verified: bool = False
     followers_count: int = 0
+    following_count: int = 0
+    statuses_count: int = 0
+    profile_image_url: Optional[str] = None
 
 
-class User(UserBase):
-    """Full user model for responses."""
-    pass
+class Account(AccountBase):
+    """Full account model for responses."""
+    created_at: Optional[datetime] = Field(None, alias="createdAt")
+    
+    class Config:
+        populate_by_name = True
+
+
+# ============================================================================
+# Tweet Analysis Models (Sentiment/classification - separate from raw tweet)
+# ============================================================================
+
+class TweetAnalysisBase(BaseModel):
+    """Base tweet analysis model."""
+    sentiment: Optional[str] = None  # very_bullish, bullish, neutral, bearish, very_bearish
+    subnet_id: Optional[int] = Field(None, alias="subnetId")
+    subnet_name: Optional[str] = Field(None, alias="subnetName")
+    content_type: Optional[str] = Field(None, alias="contentType")
+    
+    class Config:
+        populate_by_name = True
+
+
+class TweetAnalysisCreate(BaseModel):
+    """Model for creating tweet analysis."""
+    tweet_id: int
+    sentiment: Optional[str] = None
+    subnet_id: Optional[int] = None
+    subnet_name: Optional[str] = None
+    content_type: Optional[str] = None
+    analysis_data: Optional[dict] = None
+
+
+class TweetAnalysis(TweetAnalysisBase):
+    """Full tweet analysis model for responses."""
+    id: int
+    tweet_id: int = Field(alias="tweetId")
+    analyzed_at: datetime = Field(alias="analyzedAt")
+    
+    class Config:
+        populate_by_name = True
 
 
 # ============================================================================
@@ -47,17 +98,31 @@ class User(UserBase):
 
 class TweetBase(BaseModel):
     """Base tweet model with common fields."""
-    id: str
-    created_at: datetime = Field(alias="createdAt")
-    text: str
-    user_id: str = Field(alias="userId")
-    url: str
-    timestamp: datetime
-    sentiment: Optional[str] = None
-    like_count: int = 0
-    retweet_count: int = 0
-    quote_count: int = 0
-    reply_count: int = 0
+    id: int  # BigInt in Prisma
+    type: str = "tweet"
+    url: Optional[str] = None
+    text: Optional[str] = None
+    lang: Optional[str] = None
+    
+    # Engagement metrics
+    retweet_count: int = Field(0, alias="retweetCount")
+    reply_count: int = Field(0, alias="replyCount")
+    like_count: int = Field(0, alias="likeCount")
+    quote_count: int = Field(0, alias="quoteCount")
+    view_count: int = Field(0, alias="viewCount")
+    bookmark_count: int = Field(0, alias="bookmarkCount")
+    
+    # Reply/conversation info
+    is_reply: bool = Field(False, alias="isReply")
+    in_reply_to_id: Optional[int] = Field(None, alias="inReplyToId")
+    conversation_id: Optional[int] = Field(None, alias="conversationId")
+    
+    # Author
+    author_id: Optional[int] = Field(None, alias="authorId")
+    
+    # Timestamps
+    created_at: Optional[datetime] = Field(None, alias="createdAt")
+    received_at: datetime = Field(alias="receivedAt")
     
     class Config:
         populate_by_name = True
@@ -65,25 +130,33 @@ class TweetBase(BaseModel):
 
 class TweetCreate(BaseModel):
     """Model for creating a new tweet."""
-    id: str
-    created_at: datetime
-    text: str
-    user_id: str
-    timestamp: datetime
-    sentiment: Optional[str] = None
+    id: int
+    type: str = "tweet"
+    url: Optional[str] = None
+    text: Optional[str] = None
+    lang: Optional[str] = None
+    author_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    retweet_count: int = 0
+    reply_count: int = 0
+    like_count: int = 0
+    quote_count: int = 0
+    view_count: int = 0
+    bookmark_count: int = 0
+    is_reply: bool = False
+    in_reply_to_id: Optional[int] = None
+    conversation_id: Optional[int] = None
 
 
 class Tweet(TweetBase):
     """Full tweet model for responses."""
-    insertion_timestamp: datetime = Field(alias="insertionTimestamp")
-    
-    class Config:
-        populate_by_name = True
+    pass
 
 
-class TweetWithUser(Tweet):
-    """Tweet model with nested user information."""
-    user: User
+class TweetWithAuthor(Tweet):
+    """Tweet model with nested author (account) information."""
+    author: Optional[Account] = None
+    analysis: Optional[TweetAnalysis] = None
 
 
 # ============================================================================
@@ -92,9 +165,9 @@ class TweetWithUser(Tweet):
 
 class ScoringBase(BaseModel):
     """Base scoring model with common fields."""
-    id: str
-    tweet_id: str = Field(alias="tweetId")
-    status: str = "pending"
+    id: int
+    tweet_id: int = Field(alias="tweetId")
+    status: str = "pending"  # pending, in_progress, completed
     
     class Config:
         populate_by_name = True
@@ -102,7 +175,7 @@ class ScoringBase(BaseModel):
 
 class ScoringCreate(BaseModel):
     """Model for creating a scoring entry."""
-    tweet_id: str
+    tweet_id: int
     status: str = "pending"
     validator_hotkey: Optional[str] = None
 
@@ -117,11 +190,16 @@ class Scoring(ScoringBase):
     """Full scoring model for responses."""
     start_time: Optional[datetime] = Field(None, alias="startTime")
     validator_hotkey: Optional[str] = Field(None, alias="validatorHotkey")
+    score: Optional[float] = None
+    created_at: datetime = Field(alias="createdAt")
+    
+    class Config:
+        populate_by_name = True
 
 
 class ScoringWithTweet(Scoring):
     """Scoring model with nested tweet information."""
-    tweet: Tweet
+    tweet: TweetWithAuthor
 
 
 # ============================================================================
@@ -131,7 +209,7 @@ class ScoringWithTweet(Scoring):
 class PenaltyBase(BaseModel):
     """Base penalty model with common fields."""
     hotkey: str
-    reason: str
+    reason: Optional[str] = None  # reason is optional in the schema
     
     class Config:
         populate_by_name = True
@@ -140,12 +218,12 @@ class PenaltyBase(BaseModel):
 class PenaltyCreate(BaseModel):
     """Model for creating a penalty."""
     hotkey: str
-    reason: str
+    reason: Optional[str] = None
 
 
 class Penalty(PenaltyBase):
     """Full penalty model for responses."""
-    id: str
+    id: int
     timestamp: datetime
 
 
@@ -179,7 +257,11 @@ class RewardCreate(BaseModel):
 
 class Reward(RewardBase):
     """Full reward model for responses."""
-    id: str
+    id: int
+    created_at: datetime = Field(alias="createdAt")
+    
+    class Config:
+        populate_by_name = True
 
 
 class RewardBulkCreate(BaseModel):
@@ -194,21 +276,27 @@ class RewardBulkCreate(BaseModel):
 class BlacklistedHotkeyBase(BaseModel):
     """Base blacklisted hotkey model."""
     hotkey: str
+    reason: Optional[str] = None
 
 
-class BlacklistedHotkeyCreate(BlacklistedHotkeyBase):
+class BlacklistedHotkeyCreate(BaseModel):
     """Model for creating a blacklisted hotkey."""
-    pass
+    hotkey: str
+    reason: Optional[str] = None
 
 
 class BlacklistedHotkey(BlacklistedHotkeyBase):
     """Full blacklisted hotkey model for responses."""
-    pass
+    created_at: datetime = Field(alias="createdAt")
+    
+    class Config:
+        populate_by_name = True
 
 
 class BlacklistedHotkeyBulkCreate(BaseModel):
     """Model for creating multiple blacklisted hotkeys at once."""
     hotkeys: List[str]
+    reason: Optional[str] = None
 
 
 # ============================================================================
@@ -217,13 +305,13 @@ class BlacklistedHotkeyBulkCreate(BaseModel):
 
 class TweetsForScoringResponse(BaseModel):
     """Response model for getting tweets for scoring."""
-    tweets: List[TweetWithUser]
+    tweets: List[TweetWithAuthor]
     count: int
 
 
 class CompletedTweetSubmission(BaseModel):
     """Model for submitting a completed scored tweet."""
-    tweet_id: str
+    tweet_id: int
     sentiment: str
 
 
@@ -242,4 +330,3 @@ class SubmissionResponse(BaseModel):
 class ErrorResponse(BaseModel):
     """Error response model."""
     detail: str
-
