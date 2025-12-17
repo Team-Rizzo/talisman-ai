@@ -20,7 +20,7 @@
 import bittensor as bt
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
-from talisman_ai.models.tweet import Tweet
+from talisman_ai.utils.api_models import TweetWithUser
 
 class Score(bt.Synapse):
     """
@@ -51,7 +51,45 @@ class TweetBatch(bt.Synapse):
     """
     Synapse for sending tweet batch from miner to validator.
     """
-    tweet_batch: List[Tweet] 
+    tweet_batch: List[TweetWithUser] 
+
+
+class ValidatorRewards(bt.Synapse):
+    """
+    Synapse for broadcasting validator-scored rewards to other validators.
+
+    Rewards are sent as a compact mapping of miner UID -> integer points for a single epoch.
+    This avoids the 128-byte limitation of knowledge commitments and supports moderate volume.
+
+    Fields:
+      - epoch: scoring epoch index (e.g., block//BLOCK_LENGTH)
+      - uid_points: { miner_uid: points }
+      - sender_hotkey: validator hotkey broadcasting this data
+      - seq: monotonically increasing sequence number per sender (we use epoch by default)
+    """
+    epoch: int
+    uid_points: Dict[int, int]
+    sender_hotkey: str
+    seq: int
+
+
+class ValidatorPenalties(bt.Synapse):
+    """
+    Synapse for broadcasting validator-scored penalties to other validators.
+
+    Penalties are sent as a compact mapping of miner UID -> penalty count for a single epoch.
+    Miners with penalties will have their rewards zeroed out.
+
+    Fields:
+      - epoch: scoring epoch index (e.g., block//BLOCK_LENGTH)
+      - uid_penalties: { miner_uid: penalty_count }
+      - sender_hotkey: validator hotkey broadcasting this data
+      - seq: monotonically increasing sequence number per sender (we use epoch by default)
+    """
+    epoch: int
+    uid_penalties: Dict[int, int]
+    sender_hotkey: str
+    seq: int
 
 class ValidationResult(bt.Synapse):
     """

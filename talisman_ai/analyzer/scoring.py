@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple
 import random
 import bittensor as bt
 
+from talisman_ai.utils.api_models import TweetWithUser
 from .relevance import SubnetRelevanceAnalyzer, PostClassification
 
 
@@ -68,12 +69,7 @@ def recency_score(post_date_iso: str, horizon_hours: float = 24.0) -> float:
 
 
 def value_score(
-    like_count: int,
-    retweet_count: int,
-    quote_count: int,
-    reply_count: int,
-    author_followers: int,
-    account_age_days: int,
+    post_info: TweetWithUser,
     caps: Dict = CAPS,
 ) -> float:
     """
@@ -84,24 +80,19 @@ def value_score(
     5. Author credibility (follower count)
     
     Args:
-        like_count: Number of likes on the post
-        retweet_count: Number of retweets
-        quote_count: Number of quote tweets
-        reply_count: Number of replies
-        author_followers: Number of followers the author has
-        account_age_days: Age of the author's account in days (ignored for now)
+        post_info: TweetWithUser object
         caps: Dictionary of cap values for normalization (defaults to CAPS)
         
     Returns:
         Value score in [0.0, 1.0]
     """
     comps = [
-        _norm(like_count or 0, caps["likes"]),
-        _norm(retweet_count or 0, caps["retweets"]),
-        _norm(quote_count or 0, caps["quotes"]),
-        _norm(reply_count or 0, caps["replies"]),
-        _norm(author_followers or 0, caps["followers"]),
-        # _norm(account_age_days or 0, caps["account_age_days"]),  # Excluded for now
+        _norm(post_info.like_count or 0, caps["likes"]),
+        _norm(post_info.retweet_count or 0, caps["retweets"]),
+        _norm(post_info.quote_count or 0, caps["quotes"]),
+        _norm(post_info.reply_count or 0, caps["replies"]),
+        _norm(post_info.user.followers or 0, caps["followers"]),
+        # _norm(post_info.user.account_age_days or 0, caps["account_age_days"]),  # Excluded for now
     ]
     return sum(comps) / len(comps)
 
@@ -109,7 +100,7 @@ def value_score(
 # ===== Validator Batch Verification =====
 
 def validate_miner_batch(
-    miner_batch: List[Dict],
+    miner_batch: List[TweetWithUser],
     analyzer: SubnetRelevanceAnalyzer,
     sample_size: int = 10,
     seed: int = None
@@ -125,10 +116,9 @@ def validate_miner_batch(
     5. If any deviate → reject batch
     
     Args:
-        miner_batch: List of post dicts with keys:
-            - post_text: The post content
-            - miner_classification: Dict with miner's claimed classification
-                - Must contain all fields to build canonical string
+        miner_batch: List of TweetWithUser objects with keys:
+            - text: The post content
+            - user: User object
         analyzer: SubnetRelevanceAnalyzer instance
         sample_size: Number of posts to sample for validation (default: 10)
         seed: Random seed for reproducible sampling (optional)
@@ -151,8 +141,8 @@ def validate_miner_batch(
     matches = 0
     discrepancies = []
     
-    for i, post_data in enumerate(sampled_posts):
-        post_text = post_data.get("post_text", "")
+    for i, post_data in enumerate[TweetWithUser](sampled_posts):
+        post_text = post_data.text
         miner_classification = post_data.get("miner_classification", {})
         
         # Validator runs classification
@@ -216,7 +206,7 @@ def validate_miner_batch(
     return is_valid, result
 
 
-def _build_canonical_from_dict(classification: Dict) -> str:
+def _build_canonical_from_dict(classification: PostClassification) -> str:
     """
     Build canonical string from miner's classification dictionary
     
@@ -229,15 +219,15 @@ def _build_canonical_from_dict(classification: Dict) -> str:
         Canonical string for exact matching
     """
     # Extract fields
-    subnet_id = int(classification["subnet_id"])
-    content_type = classification["content_type"]
-    sentiment = classification["sentiment"]
-    technical_quality = classification["technical_quality"]
-    market_analysis = classification["market_analysis"]
-    impact_potential = classification["impact_potential"]
-    relevance_confidence = classification["relevance_confidence"]
-    evidence_spans = classification.get("evidence_spans", [])
-    anchors_detected = classification.get("anchors_detected", [])
+    subnet_id = int(classification.subnet_id)
+    content_type = classification.content_type
+    sentiment = classification.sentiment
+    technical_quality = classification.technical_quality
+    market_analysis = classification.market_analysis
+    impact_potential = classification.impact_potential
+    relevance_confidence = classification.relevance_confidence
+    evidence_spans = classification.evidence_spans
+    anchors_detected = classification.anchors_detected
     
     # Sort evidence for determinism (same as PostClassification)
     sorted_evidence = "|".join(sorted([s.lower() for s in evidence_spans]))
@@ -256,7 +246,7 @@ RECENCY_WEIGHT = 0.10    # 10% weight on recency
 
 def compute_post_score(
     classification: PostClassification,
-    post_info: Dict,
+    post_info: TweetWithUser,
     weights: Dict = None
 ) -> float:
     """
@@ -264,14 +254,14 @@ def compute_post_score(
     
     Args:
         classification: PostClassification result
-        post_info: Dict with engagement metrics and post_date
+        post_info: TweetWithUser object
         weights: Optional custom weights dict
         
     Returns:
         Final score in [0.0, 1.0]
     """
     # Check if post is older than 10 days - if so, return 0
-    post_date_str = post_info.get("post_date", datetime.now(timezone.utc).isoformat())
+    post_date_str = post_info.created_at.isoformat()
     dt = datetime.fromisoformat(post_date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
     age_days = (datetime.now(timezone.utc) - dt).total_seconds() / (3600.0 * 24.0)
     if age_days > 10:
@@ -289,16 +279,11 @@ def compute_post_score(
     
     # Value: engagement + author credibility
     val = value_score(
-        like_count=post_info.get("like_count", 0) or 0,
-        retweet_count=post_info.get("retweet_count", 0) or 0,
-        quote_count=post_info.get("quote_count", 0) or 0,
-        reply_count=post_info.get("reply_count", 0) or 0,
-        author_followers=post_info.get("author_followers", 0) or 0,
-        account_age_days=post_info.get("account_age_days", 0) or 0,
+        post_info=post_info,
     )
     
     # Recency
-    rec = recency_score(post_info.get("post_date", datetime.now(timezone.utc).isoformat()))
+    rec = recency_score(post_info.created_at.isoformat())
     
     # Combine
     final = weights["relevance"] * relevance + weights["value"] * val + weights["recency"] * rec
@@ -308,7 +293,7 @@ def compute_post_score(
 
 # ===== Backward Compatibility Functions for Legacy Code =====
 
-def get_tokens_from_analysis(analysis_result: Dict) -> Dict[str, float]:
+def get_tokens_from_analysis(analysis_result: PostClassification) -> Dict[str, float]:
     """
     Extract tokens dict from analysis result for grader compatibility.
     
@@ -321,13 +306,13 @@ def get_tokens_from_analysis(analysis_result: Dict) -> Dict[str, float]:
     Returns:
         Dict mapping subnet_name to 1.0 if matched, empty dict if no match
     """
-    classification = analysis_result.get("classification")
+    classification = analysis_result
     if classification is None:
         return {}
-    return classification.get_tokens_dict()
+    return classification.to_tokens_dict()
 
 
-def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_result: Dict = None) -> Tuple[float, List[Tuple[str, Dict]]]:
+def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_result: PostClassification = None) -> Tuple[float, List[Tuple[str, PostClassification]]]:
     """
     Get classification from analyzer and return subnet relevance data.
     
@@ -349,18 +334,18 @@ def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_resu
         out = analysis_result
     
     # Get classification object
-    classification = out.get("classification")
+    classification = out
     if classification is None or classification.subnet_id == 0:
         return 0.0, []  # No match = 0.0 relevance
     
     # Return full classification data (not lossy floats)
     subnet_name = classification.subnet_name
-    classification_data = out.get("subnet_relevance", {}).get(subnet_name, {})
+    classification_data = classification.to_dict()
     
     return 1.0, [(subnet_name, classification_data)]  # Binary: matched or not
 
 
-def score_post_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict = None) -> Dict:
+def score_post_entry(entry: TweetWithUser, analyzer, k: int = 5, analysis_result: PostClassification = None) -> Dict:
     """
     Score a single post entry with rich classification data preserved.
     
@@ -368,17 +353,7 @@ def score_post_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict = 
     consumers can use the rich categorical data for database storage, analytics, etc.
     
     Args:
-        entry: Dictionary containing post entry with keys:
-            - url: Post URL or identifier
-            - post_info: Dictionary with post metadata containing:
-                - post_text: The post text content
-                - post_date: ISO format date string
-                - like_count: Number of likes (optional, defaults to 0)
-                - retweet_count: Number of retweets (optional, defaults to 0)
-                - quote_count: Number of quote tweets (optional, defaults to 0)
-                - reply_count: Number of replies (optional, defaults to 0)
-                - author_followers: Author's follower count (optional, defaults to 0)
-                - account_age_days: Author's account age in days (optional, defaults to 0)
+        entry: TweetWithUser object
         analyzer: SubnetRelevanceAnalyzer instance
         k: Kept for API compatibility (not used anymore - we return 1 subnet or none)
         analysis_result: Optional pre-computed analysis result dict
@@ -393,15 +368,15 @@ def score_post_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict = 
             - recency: Recency score based on post age [0.0, 1.0]
             - score: Final weighted score [0.0, 1.0]
     """
-    info = entry["post_info"]
+    info = entry
 
     # Check if post is older than 10 days - if so, return 0 score
-    post_date_str = info.get("post_date", datetime.now(timezone.utc).isoformat())
+    post_date_str = info.created_at.isoformat()
     dt = datetime.fromisoformat(post_date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
     age_days = (datetime.now(timezone.utc) - dt).total_seconds() / (3600.0 * 24.0)
     if age_days > 10:
         return {
-            "url": entry.get("url", ""),
+            "url": entry.url,
             "classification": None,
             "subnet_data": None,
             "relevance": 0.0,
@@ -411,29 +386,24 @@ def score_post_entry(entry: Dict, analyzer, k: int = 5, analysis_result: Dict = 
         }
 
     # Get classification with full rich data
-    rel, subnet_data = top_k_relevance_from_analyzer(info["post_text"], analyzer, k=k, analysis_result=analysis_result)
+    rel, subnet_data = top_k_relevance_from_analyzer(info.text, analyzer, k=k, analysis_result=analysis_result)
     
     # Get the full classification object if available
     if analysis_result is None:
-        analysis_result = analyzer.analyze_post_complete(info["post_text"])
-    classification = analysis_result.get("classification")
+        analysis_result = analyzer.analyze_post_complete(info.text)
+    classification = analysis_result
     
     # Compute engagement scores
     val = value_score(
-        like_count=info.get("like_count", 0) or 0,
-        retweet_count=info.get("retweet_count", 0) or 0,
-        quote_count=info.get("quote_count", 0) or 0,
-        reply_count=info.get("reply_count", 0) or 0,
-        author_followers=info.get("author_followers", 0) or 0,
-        account_age_days=info.get("account_age_days", 0) or 0,
+        post_info=info,
     )
-    rec = recency_score(info["post_date"])
+    rec = recency_score(info.created_at.isoformat())
 
     # Combine components using default weights
     final = RELEVANCE_WEIGHT * rel + VALUE_WEIGHT * val + RECENCY_WEIGHT * rec
 
     return {
-        "url": entry.get("url", ""),
+        "url": entry.url,
         "classification": classification,  # Full PostClassification object
         "subnet_data": subnet_data[0] if subnet_data else None,  # Full classification dict
         "relevance": rel,  # Binary: 1.0 or 0.0

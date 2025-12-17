@@ -38,6 +38,8 @@ from talisman_ai.base.utils.weight_utils import (
 from talisman_ai.mock import MockDendrite
 from talisman_ai.utils.config import add_validator_args
 from talisman_ai.protocol import TweetBatch
+from talisman_ai.protocol import ValidatorRewards
+from talisman_ai.protocol import ValidatorPenalties
 
 
 class BaseValidatorNeuron(BaseNeuron):
@@ -109,6 +111,18 @@ class BaseValidatorNeuron(BaseNeuron):
                     blacklist_fn=self.blacklist_tweets,
                     priority_fn=self.priority_tweets,
                 )
+                # Allow validator↔validator reward broadcasts.
+                self.axon.attach(
+                    forward_fn=self.forward_validator_rewards,
+                    blacklist_fn=self.blacklist_tweets,
+                    priority_fn=self.priority_tweets,
+                )
+                # Allow validator↔validator penalty broadcasts.
+                self.axon.attach(
+                    forward_fn=self.forward_validator_penalties,
+                    blacklist_fn=self.blacklist_tweets,
+                    priority_fn=self.priority_tweets,
+                )
                 bt.logging.info(
                     f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
                 )
@@ -125,6 +139,20 @@ class BaseValidatorNeuron(BaseNeuron):
     async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
         """
         Forward tweets to the network.
+        """
+        return synapse
+
+    async def forward_validator_rewards(self, synapse: ValidatorRewards) -> ValidatorRewards:
+        """
+        Default handler for validator↔validator reward broadcasts.
+        Subclasses (e.g. neurons/validator.py) should override to persist/ingest.
+        """
+        return synapse
+
+    async def forward_validator_penalties(self, synapse: ValidatorPenalties) -> ValidatorPenalties:
+        """
+        Default handler for validator↔validator penalty broadcasts.
+        Subclasses (e.g. neurons/validator.py) should override to persist/ingest.
         """
         return synapse
     

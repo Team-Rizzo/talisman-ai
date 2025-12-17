@@ -19,8 +19,9 @@ class UserBase(BaseModel):
     id: str
     username: str
     screen_name: str = Field(alias="screenName")
-    following: int = 0
-    followers: int = 0
+    following_count: int = 0
+    followers_count: int = 0
+    account_age_days: int = 0
     
     class Config:
         populate_by_name = True
@@ -31,8 +32,8 @@ class UserCreate(BaseModel):
     id: str
     username: str
     screen_name: str
-    following: int = 0
-    followers: int = 0
+    following_count: int = 0
+    followers_count: int = 0
 
 
 class User(UserBase):
@@ -50,8 +51,13 @@ class TweetBase(BaseModel):
     created_at: datetime = Field(alias="createdAt")
     text: str
     user_id: str = Field(alias="userId")
+    url: str
     timestamp: datetime
     sentiment: Optional[str] = None
+    like_count: int = 0
+    retweet_count: int = 0
+    quote_count: int = 0
+    reply_count: int = 0
     
     class Config:
         populate_by_name = True

@@ -162,6 +162,12 @@ class TweetStore:
         Returns list of tweet dicts that are in Processed.
         """
         return [t for t in self._tweets.values() if t.status == TweetStatus.PROCESSED]
+
+    def get_unprocessed_tweets(self):
+        """
+        Returns list of TweetStoreItem that are in Unprocessed.
+        """
+        return [t for t in self._tweets.values() if t.status == TweetStatus.UNPROCESSED]
     
     def get_processing_tweets(self):
         """
