@@ -66,25 +66,69 @@ class Validator(BaseValidatorNeuron):
         """
         The synapse is a TweetBatch from the miner
         """
-        # ensure the batch size is equal to the MINER_BATCH_SIZE
-        if len(synapse.tweet_batch) != config.MINER_BATCH_SIZE:
-            bt.logging.error(f"[VALIDATION] Tweet batch size is not equal to MINER_BATCH_SIZE: {len(synapse.tweet_batch)} != {config.MINER_BATCH_SIZE}")
-            self._miner_penalty.add_penalty(synapse.dendrite.hotkey, "Invalid batch size")
+        # Note: in the normal workflow we query miners via dendrite and handle the response in
+        # `_process_miner_batch()`. This axon handler is retained for compatibility/testing.
+        miner_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
+        if not miner_hotkey:
             return synapse
-        
-        # Score the tweets
-        is_valid, result = await validate_miner_batch(synapse.tweet_batch, self._analyzer)
-        if not is_valid:
-            hotkey = synapse.dendrite.hotkey
-            for tweet in synapse.tweet_batch:
-                self._tweet_store.reset_to_unprocessed(tweet.id)
-            self._miner_penalty.add_penalty(hotkey, "Invalid score")
-            return synapse
-
-        for tweet in synapse.tweet_batch:
-            self._tweet_store.set_processed(tweet.id)
-            self._miner_reward.add_reward(synapse.dendrite.hotkey, 1)
+        await self._handle_miner_batch_response(synapse.tweet_batch, miner_hotkey)
         return synapse
+
+    async def _handle_miner_batch_response(self, tweet_batch: List[TweetWithAuthor], miner_hotkey: str) -> bool:
+        """
+        Validate a miner's TweetBatch response and apply rewards/penalties exactly once per tweet.
+
+        Returns:
+            True if batch accepted, False otherwise.
+        """
+        # Ensure expected batch size (but don't crash the pipeline; treat mismatch as invalid).
+        if len(tweet_batch) != config.MINER_BATCH_SIZE:
+            bt.logging.warning(
+                f"[VALIDATION] Invalid batch size from miner {miner_hotkey[:12]}.. "
+                f"{len(tweet_batch)} != {config.MINER_BATCH_SIZE}"
+            )
+            self._miner_penalty.add_penalty(miner_hotkey, 1)
+            for tweet in tweet_batch:
+                try:
+                    self._tweet_store.reset_to_unprocessed(tweet.id)
+                except Exception:
+                    pass
+            return False
+
+        # Validate by re-running analyzer on sampled posts.
+        is_valid, _result = await validate_miner_batch(tweet_batch, self._analyzer)
+        if not is_valid:
+            self._miner_penalty.add_penalty(miner_hotkey, 1)
+            for tweet in tweet_batch:
+                try:
+                    self._tweet_store.reset_to_unprocessed(tweet.id)
+                except Exception:
+                    pass
+            return False
+
+        # Batch accepted: persist enriched tweets, mark processed, and reward once per tweet.
+        for tweet in tweet_batch:
+            # Ensure store has the enriched tweet for API submission.
+            try:
+                self._tweet_store.update_tweet(tweet.id, tweet)
+            except Exception:
+                # If missing, add it.
+                self._tweet_store.add_tweet(tweet, tweet_id=tweet.id, hotkey=miner_hotkey, set_as_processing=False, overwrite=True)
+
+            try:
+                self._tweet_store.set_processed(tweet.id)
+            except Exception:
+                pass
+
+            # Idempotent reward: only reward once per tweet_id.
+            if not self._tweet_store.is_rewarded(tweet.id):
+                self._miner_reward.add_reward(miner_hotkey, 1)
+                try:
+                    self._tweet_store.mark_rewarded(tweet.id)
+                except Exception:
+                    pass
+
+        return True
         
     async def _on_tweets(self, tweets: List[TweetWithAuthor]):
         """
@@ -98,7 +142,8 @@ class Validator(BaseValidatorNeuron):
         
         bt.logging.info(f"[VALIDATION] Processing {len(tweets)} tweets in batch")
         for tweet in tweets:
-            self._tweet_store.add_tweet(tweet, set_as_processing=False)
+            # Preserve existing store entries (avoid losing processed/submitted/rewarded flags).
+            self._tweet_store.add_tweet(tweet, set_as_processing=False, overwrite=False)
         miner_batches = []  
         for i in range(0, len(tweets), config.MINER_BATCH_SIZE):
             miner_batches.append(tweets[i:i + config.MINER_BATCH_SIZE])
@@ -123,6 +168,21 @@ class Validator(BaseValidatorNeuron):
             Miner response synapse, or None on failure
         """
         try:
+            miner_hotkey = None
+            try:
+                miner_hotkey = self.metagraph.hotkeys[int(uid)]
+            except Exception:
+                miner_hotkey = None
+
+            # Mark tweets as processing immediately (record attribution + start time).
+            for tweet in miner_batch:
+                # Ensure tweet exists in the store.
+                self._tweet_store.add_tweet(tweet, tweet_id=tweet.id, hotkey=miner_hotkey, set_as_processing=False, overwrite=False)
+                try:
+                    self._tweet_store.set_processing(tweet.id, hotkey=miner_hotkey)
+                except Exception:
+                    pass
+
             tweet_batch = TweetBatch(
                 tweet_batch=miner_batch
             )
@@ -134,14 +194,36 @@ class Validator(BaseValidatorNeuron):
             )
             if not responses[0].dendrite.status_code == 200:
                 bt.logging.error(f"[VALIDATION] Failed to process miner batch: {responses[0].dendrite.status_message}")
+                # Requeue locally; do not reward; do not penalize on transport errors.
+                for tweet in miner_batch:
+                    try:
+                        self._tweet_store.reset_to_unprocessed(tweet.id)
+                    except Exception:
+                        pass
                 return None
-            hotkey = self.metagraph.hotkeys[uid] # TODO no clue if this works
-            for tweet in tweet_batch.tweet_batch:
-                self._tweet_store.set_processing(tweet.id, hotkey)
-            
-            return responses[0]
+
+            response_syn = responses[0]
+            # Apply validation + reward/penalty based on miner response.
+            if miner_hotkey is None and response_syn.dendrite and response_syn.dendrite.hotkey:
+                miner_hotkey = response_syn.dendrite.hotkey
+            if miner_hotkey is None:
+                # Can't attribute; requeue.
+                for tweet in miner_batch:
+                    try:
+                        self._tweet_store.reset_to_unprocessed(tweet.id)
+                    except Exception:
+                        pass
+                return None
+
+            await self._handle_miner_batch_response(response_syn.tweet_batch, miner_hotkey)
+            return response_syn
         except Exception as e:
             bt.logging.error(f"[VALIDATION] Failed to process miner batch: {e}", exc_info=True)
+            for tweet in miner_batch:
+                try:
+                    self._tweet_store.reset_to_unprocessed(tweet.id)
+                except Exception:
+                    pass
             return None
     
     async def _submit_tweet_batch(self, tweet_batch: List[TweetWithAuthor]):

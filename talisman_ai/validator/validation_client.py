@@ -9,10 +9,6 @@ import random
 from talisman_ai import config
 from talisman_ai.utils.api_client import TalismanAPIClient
 from talisman_ai.utils.api_models import TweetWithAuthor
-from talisman_ai.utils.tweet_store import TweetStore
-from talisman_ai.utils.reward import MinerReward
-from talisman_ai.utils.penalty import MinerPenalty
-from talisman_ai.utils.api_models import PenaltyCreate
 from talisman_ai.utils.burn import calculate_weights
 from talisman_ai.models.reward import Reward
 from talisman_ai.protocol import ValidatorRewards
@@ -76,7 +72,9 @@ class ValidationClient:
                     timed_out_tweets = self._validator._tweet_store.get_timeouts()
                     for tweet in timed_out_tweets:
                         self._validator._tweet_store.reset_to_unprocessed(tweet.tweet.id)
-                        self._validator._miner_penalty.add_penalty(tweet.hotkey, "Timeout")
+                        # Penalize the miner if we know who owned this processing attempt.
+                        if tweet.hotkey:
+                            self._validator._miner_penalty.add_penalty(tweet.hotkey, 1)
                         # Penalties intentionally ignored in the rewards-only commitments rollout.
                         # Also: submit_penalties is async; leaving this commented avoids un-awaited coroutine warnings.
                         # await self.api_client.submit_penalties([PenaltyCreate(
@@ -94,10 +92,26 @@ class ValidationClient:
                     if asyncio.iscoroutine(maybe_coro):
                         await maybe_coro
                 
-                processed_tweets = self._validator._tweet_store.get_processed_tweets()
-                for tweet in processed_tweets:
-                    self._validator._miner_reward.add_reward(tweet.hotkey, 1)
-                    await self._validator._submit_tweet_batch([tweet.tweet])
+                # Submit tweets that are processed locally but not yet submitted to the API.
+                ready = self._validator._tweet_store.get_ready_to_submit()
+                if ready:
+                    # Submit in small batches; mark submitted only on success.
+                    for item in ready:
+                        try:
+                            await self._validator._submit_tweet_batch([item.tweet])
+                            self._validator._tweet_store.mark_submitted(item.tweet.id)
+                            # Remove from store after successful submission to avoid resubmission loops.
+                            self._validator._tweet_store.delete_tweet(item.tweet.id)
+                        except Exception as e:
+                            bt.logging.warning(f"[VALIDATION] Failed to submit completed tweet {item.tweet.id}: {e}")
+                            # Leave it in store for retry.
+                            continue
+
+                # Persist local state so rewards/submission idempotency survives restarts.
+                try:
+                    self._validator._tweet_store.save_to_file()
+                except Exception as e:
+                    bt.logging.debug(f"[VALIDATION] Failed to persist tweet store: {e}")
                 
                 current_epoch = self._validator._miner_reward._get_current_epoch()
                 try:

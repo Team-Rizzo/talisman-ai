@@ -2,11 +2,11 @@ from enum import Enum
 import time
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Any
 from talisman_ai import config
 from talisman_ai.utils.api_models import TweetWithAuthor
 from pydantic import BaseModel
-from typing import List
+
 class TweetStatus(Enum):
     UNPROCESSED = "Unprocessed"
     PROCESSING = "Processing"
@@ -17,13 +17,23 @@ class TweetStoreItem(BaseModel):
     status: TweetStatus
     start_time: Optional[float] = None
     hotkey: Optional[str] = None
+    # Idempotency helpers
+    submitted_to_api: bool = False
+    rewarded: bool = False
 
 class TweetStore:
     def __init__(self):
         # key: tweet_id, value: dict with 'tweet' (TweetWithAuthor), 'status', 'start_time', 'hotkey'
-        self._tweets = {}
+        self._tweets: Dict[Any, TweetStoreItem] = {}
 
-    def add_tweet(self, tweet: TweetWithAuthor, tweet_id: Optional[str] = None, hotkey: Optional[str] = None, set_as_processing: bool = True):
+    def add_tweet(
+        self,
+        tweet: TweetWithAuthor,
+        tweet_id: Optional[str] = None,
+        hotkey: Optional[str] = None,
+        set_as_processing: bool = True,
+        overwrite: bool = False,
+    ):
         """
         Adds a tweet to the store as Unprocessed.
         If tweet_id is provided, uses it as the key; else uses tweet.id.
@@ -32,18 +42,39 @@ class TweetStore:
             tweet: TweetWithAuthor object to store
             tweet_id: Optional tweet ID. If not provided, uses tweet.id
             hotkey: Optional miner hotkey processing this tweet
+            overwrite: If True, overwrite an existing entry. Defaults to False.
         """
         if tweet_id is None:
             tweet_id = tweet.id
+        # Normalize keys so persistence round-trips correctly (JSON object keys are strings).
+        tweet_id = str(tweet_id)
         # Ensure tweet is a TweetWithAuthor instance
         if not isinstance(tweet, TweetWithAuthor):
             raise TypeError(f"tweet must be a TweetWithAuthor instance, got {type(tweet)}")
+        if (tweet_id in self._tweets) and (not overwrite):
+            # Preserve existing lifecycle/idempotency flags; optionally update tweet/hotkey if missing.
+            existing = self._tweets[tweet_id]
+            if existing.tweet is None:
+                existing.tweet = tweet
+            # Only fill hotkey if not already set.
+            if hotkey is not None and existing.hotkey is None:
+                existing.hotkey = hotkey
+            return
         self._tweets[tweet_id] = TweetStoreItem(
-            tweet=tweet, 
-            status=TweetStatus.PROCESSING if set_as_processing else TweetStatus.UNPROCESSED, 
+            tweet=tweet,
+            status=TweetStatus.PROCESSING if set_as_processing else TweetStatus.UNPROCESSED,
             start_time=None,
-            hotkey=hotkey
+            hotkey=hotkey,
+            submitted_to_api=False,
+            rewarded=False,
         )
+
+    def update_tweet(self, tweet_id, tweet: TweetWithAuthor):
+        """Update the stored tweet object (e.g. attach miner analysis) without changing lifecycle flags."""
+        tweet_id = str(tweet_id)
+        if tweet_id not in self._tweets:
+            raise KeyError(f"Tweet ID {tweet_id} not found")
+        self._tweets[tweet_id].tweet = tweet
 
     def set_processing(self, tweet_id, hotkey: Optional[str] = None):
         """
@@ -53,6 +84,7 @@ class TweetStore:
             tweet_id: ID of the tweet to set as processing
             hotkey: Optional miner hotkey processing this tweet
         """
+        tweet_id = str(tweet_id)
         if tweet_id in self._tweets:
             self._tweets[tweet_id].status = TweetStatus.PROCESSING
             self._tweets[tweet_id].start_time = time.time()
@@ -65,16 +97,42 @@ class TweetStore:
         """
         Sets the tweet as Processed and clears start_time.
         """
+        tweet_id = str(tweet_id)
         if tweet_id in self._tweets:
             self._tweets[tweet_id].status = TweetStatus.PROCESSED
             self._tweets[tweet_id].start_time = None
         else:
             raise KeyError(f"Tweet ID {tweet_id} not found")
 
+    def mark_submitted(self, tweet_id):
+        """Mark a processed tweet as successfully submitted to the API."""
+        tweet_id = str(tweet_id)
+        if tweet_id not in self._tweets:
+            raise KeyError(f"Tweet ID {tweet_id} not found")
+        self._tweets[tweet_id].submitted_to_api = True
+
+    def mark_rewarded(self, tweet_id):
+        """Mark a tweet as having already contributed reward to a miner."""
+        tweet_id = str(tweet_id)
+        if tweet_id not in self._tweets:
+            raise KeyError(f"Tweet ID {tweet_id} not found")
+        self._tweets[tweet_id].rewarded = True
+
+    def is_rewarded(self, tweet_id) -> bool:
+        tweet_id = str(tweet_id)
+        if tweet_id not in self._tweets:
+            return False
+        return bool(self._tweets[tweet_id].rewarded)
+
+    def get_ready_to_submit(self) -> List[TweetStoreItem]:
+        """Return processed tweets that have not yet been submitted to the API."""
+        return [t for t in self._tweets.values() if t.status == TweetStatus.PROCESSED and not t.submitted_to_api]
+
     def get_status(self, tweet_id):
         """
         Returns the current status of the tweet.
         """
+        tweet_id = str(tweet_id)
         if tweet_id in self._tweets:
             return self._tweets[tweet_id].status
         else:
@@ -87,6 +145,7 @@ class TweetStore:
         Returns:
             TweetWithAuthor: The stored tweet object
         """
+        tweet_id = str(tweet_id)
         if tweet_id in self._tweets:
             return self._tweets[tweet_id].tweet
         else:
@@ -108,6 +167,7 @@ class TweetStore:
         Returns:
             Optional[str]: The miner hotkey, or None if not set
         """
+        tweet_id = str(tweet_id)
         if tweet_id in self._tweets:
             return self._tweets[tweet_id].hotkey
         else:
@@ -151,6 +211,7 @@ class TweetStore:
         Resets status to Unprocessed and clears start_time.
         Note: hotkey is preserved when resetting.
         """
+        tweet_id = str(tweet_id)
         if tweet_id in self._tweets:
             self._tweets[tweet_id].status = TweetStatus.UNPROCESSED
             self._tweets[tweet_id].start_time = None
@@ -186,10 +247,17 @@ class TweetStore:
         for tweet_id in tweet_ids_to_delete:
             del self._tweets[tweet_id]
 
+    def delete_submitted_tweets(self):
+        """Deletes all tweets which have been submitted_to_api=True."""
+        tweet_ids_to_delete = [tweet_id for tweet_id, t in self._tweets.items() if bool(t.submitted_to_api)]
+        for tweet_id in tweet_ids_to_delete:
+            del self._tweets[tweet_id]
+
     def delete_tweet(self, tweet_id):
         """
         Deletes a tweet from the store.
         """
+        tweet_id = str(tweet_id)
         if tweet_id in self._tweets:
             del self._tweets[tweet_id]
         else:
@@ -248,16 +316,21 @@ class TweetStore:
         
         # Deserialize tweets
         for tweet_id, tweet_info in data.get("tweets", {}).items():
+            tweet_id = str(tweet_id)
             # Reconstruct TweetWithAuthor from dict
             tweet = TweetWithAuthor.model_validate(tweet_info["tweet"])
             # Reconstruct status enum
             status = TweetStatus(tweet_info["status"])
             start_time = tweet_info.get("start_time")
             hotkey = tweet_info.get("hotkey")  # May be None for older saved files
+            submitted_to_api = bool(tweet_info.get("submitted_to_api", False))
+            rewarded = bool(tweet_info.get("rewarded", False))
             
             self._tweets[tweet_id] = TweetStoreItem(
                 tweet=tweet,
                 status=status,
                 start_time=start_time,
-                hotkey=hotkey
+                hotkey=hotkey,
+                submitted_to_api=submitted_to_api,
+                rewarded=rewarded,
             )
