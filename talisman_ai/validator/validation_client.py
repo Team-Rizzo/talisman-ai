@@ -302,6 +302,13 @@ class ValidationClient:
                 self._validator._miner_reward.save()
                 self._validator._miner_penalty.save()
                 
+                # submit rewards and penalties to the API
+                try:
+                    await self.api_client.submit_rewards(rewards=rewards)
+                    await self.api_client.submit_penalties(penalties=local_penalties)
+                except Exception as e:
+                    bt.logging.warning(f"[ValidationClient.run] Failed to submit rewards and penalties: {e}")
+                
                 await asyncio.sleep(float(self.poll_seconds))
         except Exception as e:
             bt.logging.error(f"[ValidationClient.run] Failed to run validation client: {e}", exc_info=True)
