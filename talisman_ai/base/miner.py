@@ -59,14 +59,14 @@ class BaseMinerNeuron(BaseNeuron):
         #     config=self.config() if callable(self.config) else self.config,
         # )
 
-        self.axon = bt.axon(
+        self.axon = bt.Axon(
             wallet=self.wallet,
             config=self.config,
             port=self.config.axon.port,
             ip=self.config.axon.ip,
             external_ip=self.config.axon.external_ip,
             external_port=self.config.axon.external_port,
-            max_workers=self.config.axon.max_workers
+            max_workers=self.config.axon.max_workers,
         )
 
         # Attach determiners which functions are called when servicing a request.

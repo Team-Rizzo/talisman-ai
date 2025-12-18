@@ -278,7 +278,9 @@ def compute_post_score(
         Final score in [0.0, 1.0]
     """
     # Check if post is older than 10 days - if so, return 0
-    post_date_str = post_info.created_at.isoformat()
+    if not post_info.created_at:
+        return 0.0
+    post_date_str = post_info.created_at if isinstance(post_info.created_at, str) else post_info.created_at.isoformat()
     dt = datetime.fromisoformat(post_date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
     age_days = (datetime.now(timezone.utc) - dt).total_seconds() / (3600.0 * 24.0)
     if age_days > 10:
@@ -388,7 +390,17 @@ def score_post_entry(entry: TweetWithAuthor, analyzer, k: int = 5, analysis_resu
     info = entry
 
     # Check if post is older than 10 days - if so, return 0 score
-    post_date_str = info.created_at.isoformat()
+    if not info.created_at:
+        return {
+            "url": entry.url,
+            "classification": None,
+            "subnet_data": None,
+            "relevance": 0.0,
+            "value": 0.0,
+            "recency": 0.0,
+            "score": 0.0
+        }
+    post_date_str = info.created_at if isinstance(info.created_at, str) else info.created_at.isoformat()
     dt = datetime.fromisoformat(post_date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
     age_days = (datetime.now(timezone.utc) - dt).total_seconds() / (3600.0 * 24.0)
     if age_days > 10:

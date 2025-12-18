@@ -5,7 +5,6 @@ These models correspond to the Prisma schema and are used for
 request/response validation and serialization.
 """
 
-from datetime import datetime
 from typing import Optional, List, Any
 from pydantic import BaseModel, Field
 
@@ -51,7 +50,9 @@ class AccountCreate(BaseModel):
 
 class Account(AccountBase):
     """Full account model for responses."""
-    created_at: Optional[datetime] = Field(None, alias="createdAt")
+    # NOTE: Keep timestamps as ISO strings to avoid JSON serialization issues when
+    # TweetWithAuthor objects are embedded inside bittensor synapses.
+    created_at: Optional[str] = Field(None, alias="createdAt")
     
     class Config:
         populate_by_name = True
@@ -73,6 +74,9 @@ class TweetAnalysisBase(BaseModel):
     
     class Config:
         populate_by_name = True
+        # Allow API-side analysis objects (which include id/tweetId/analyzedAt) to be
+        # accepted where we only need the base classification fields.
+        extra = "allow"
 
 
 class TweetAnalysisCreate(BaseModel):
@@ -89,7 +93,7 @@ class TweetAnalysis(TweetAnalysisBase):
     """Full tweet analysis model for responses."""
     id: int
     tweet_id: int = Field(alias="tweetId")
-    analyzed_at: datetime = Field(alias="analyzedAt")
+    analyzed_at: str = Field(alias="analyzedAt")
     
     class Config:
         populate_by_name = True
@@ -124,8 +128,8 @@ class TweetBase(BaseModel):
     author_id: Optional[int] = Field(None, alias="authorId")
     
     # Timestamps
-    created_at: Optional[datetime] = Field(None, alias="createdAt")
-    received_at: datetime = Field(alias="receivedAt")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    received_at: str = Field(alias="receivedAt")
     
     class Config:
         populate_by_name = True
@@ -139,7 +143,7 @@ class TweetCreate(BaseModel):
     text: Optional[str] = None
     lang: Optional[str] = None
     author_id: Optional[int] = None
-    created_at: Optional[datetime] = None
+    created_at: Optional[str] = None
     retweet_count: int = 0
     reply_count: int = 0
     like_count: int = 0
@@ -159,7 +163,9 @@ class Tweet(TweetBase):
 class TweetWithAuthor(Tweet):
     """Tweet model with nested author (account) information."""
     author: Optional[Account] = None
-    analysis: Optional[TweetAnalysis] = None
+    # Miner responses only include base analysis fields (no DB ids/timestamps),
+    # so this must be the base type (or parsing will fail).
+    analysis: Optional[TweetAnalysisBase] = None
 
 
 # ============================================================================
@@ -191,10 +197,10 @@ class ScoringUpdate(BaseModel):
 
 class Scoring(ScoringBase):
     """Full scoring model for responses."""
-    start_time: Optional[datetime] = Field(None, alias="startTime")
+    start_time: Optional[str] = Field(None, alias="startTime")
     validator_hotkey: Optional[str] = Field(None, alias="validatorHotkey")
     score: Optional[float] = None
-    created_at: datetime = Field(alias="createdAt")
+    created_at: str = Field(alias="createdAt")
     
     class Config:
         populate_by_name = True
@@ -227,7 +233,7 @@ class PenaltyCreate(BaseModel):
 class Penalty(PenaltyBase):
     """Full penalty model for responses."""
     id: int
-    timestamp: datetime
+    timestamp: str
 
 
 class PenaltyBulkCreate(BaseModel):
@@ -261,7 +267,7 @@ class RewardCreate(BaseModel):
 class Reward(RewardBase):
     """Full reward model for responses."""
     id: int
-    created_at: datetime = Field(alias="createdAt")
+    created_at: str = Field(alias="createdAt")
     
     class Config:
         populate_by_name = True
@@ -290,7 +296,7 @@ class BlacklistedHotkeyCreate(BaseModel):
 
 class BlacklistedHotkey(BlacklistedHotkeyBase):
     """Full blacklisted hotkey model for responses."""
-    created_at: datetime = Field(alias="createdAt")
+    created_at: str = Field(alias="createdAt")
     
     class Config:
         populate_by_name = True

@@ -26,7 +26,7 @@ class ValidationClient:
         poll_seconds: Optional[int] = None,
         http_timeout: Optional[float] = None,
         scores_block_interval: Optional[int] = None,
-        wallet: Optional[bt.wallet] = None,
+        wallet: Optional[bt.Wallet] = None,
     ):
         """
         Initialize the ValidationClient.

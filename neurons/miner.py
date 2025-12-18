@@ -26,9 +26,28 @@ class Miner(BaseMinerNeuron):
         bt.logging.info("[Miner] Initializing analyzer...")
         self.analyzer = setup_analyzer()
         bt.logging.info("[Miner] Analyzer initialized")
+
+        # IMPORTANT: Register a concrete TweetBatch handler on the axon.
+        # Bittensor routes requests by synapse class name; attaching only `forward(self, bt.Synapse)`
+        # registers the generic `Synapse` endpoint and does *not* register `TweetBatch`.
+        self.axon.attach(
+            forward_fn=self.forward_tweets,
+            blacklist_fn=self.blacklist_tweet_batch,
+            priority_fn=self.priority_tweet_batch,
+        )
         
         hotkey = self.wallet.hotkey.ss58_address
         bt.logging.info(f"[Miner] V3 miner started with hotkey: {hotkey}")
+
+    async def blacklist_tweet_batch(
+        self, synapse: talisman_ai.protocol.TweetBatch
+    ) -> typing.Tuple[bool, str]:
+        """Typed wrapper so bittensor's axon signature checks pass for TweetBatch."""
+        return await self.blacklist(synapse)
+
+    async def priority_tweet_batch(self, synapse: talisman_ai.protocol.TweetBatch) -> float:
+        """Typed wrapper so bittensor's axon signature checks pass for TweetBatch."""
+        return await self.priority(synapse)
     
     async def forward_is_alive(self, synapse: talisman_ai.protocol.IsAlive) -> talisman_ai.protocol.IsAlive:
         """

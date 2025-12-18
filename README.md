@@ -193,7 +193,7 @@ pip install -r requirements.txt
 pip install -e .
 cp .miner_env_tmpl .miner_env
 # edit .miner_env to include your LLM information (MODEL, API_KEY, LLM_BASE)
-python neurons/miner.py \
+.venv/bin/python -m neurons.miner \
   --netuid 45 \
   --wallet.name your_coldkey_here \
   --wallet.hotkey your_hotkey_here \
@@ -217,6 +217,13 @@ python3 scripts/start_validator.py
     --wallet.hotkey <your hotkey> # Must be created using the bittensor-cli
     --logging.debug # Run in debug mode, alternatively --logging.trace for trace mode
     --axon.port # VERY IMPORTANT: set the port to be one of the open TCP ports on your machine
+```
+
+If you run into a pip error like “packages do not match the hashes…”, it can be caused by a stale pip wheel cache.
+Try:
+
+```bash
+.venv/bin/python -m pip cache purge
 ```
 
 ---

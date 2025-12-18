@@ -19,6 +19,7 @@
 
 
 import copy
+import typing
 import numpy as np
 import asyncio
 import argparse
@@ -68,7 +69,7 @@ class BaseValidatorNeuron(BaseNeuron):
         if self.config.mock:
             self.dendrite = MockDendrite(wallet=self.wallet)
         else:
-            self.dendrite = bt.dendrite(wallet=self.wallet)
+            self.dendrite = bt.Dendrite(wallet=self.wallet)
         bt.logging.info(f"Dendrite: {self.dendrite}")
 
         # Set up initial scoring weights for validation
@@ -99,7 +100,7 @@ class BaseValidatorNeuron(BaseNeuron):
 
         bt.logging.info("serving ip to chain...")
         try:
-            self.axon = bt.axon(wallet=self.wallet, config=self.config)
+            self.axon = bt.Axon(wallet=self.wallet, config=self.config)
 
             try:
                 self.subtensor.serve_axon(
@@ -114,14 +115,14 @@ class BaseValidatorNeuron(BaseNeuron):
                 # Allow validator↔validator reward broadcasts.
                 self.axon.attach(
                     forward_fn=self.forward_validator_rewards,
-                    blacklist_fn=self.blacklist_tweets,
-                    priority_fn=self.priority_tweets,
+                    blacklist_fn=self.blacklist_validator_rewards,
+                    priority_fn=self.priority_validator_rewards,
                 )
                 # Allow validator↔validator penalty broadcasts.
                 self.axon.attach(
                     forward_fn=self.forward_validator_penalties,
-                    blacklist_fn=self.blacklist_tweets,
-                    priority_fn=self.priority_tweets,
+                    blacklist_fn=self.blacklist_validator_penalties,
+                    priority_fn=self.priority_validator_penalties,
                 )
                 bt.logging.info(
                     f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
@@ -156,7 +157,9 @@ class BaseValidatorNeuron(BaseNeuron):
         """
         return synapse
     
-    async def blacklist_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> bool:
+    async def blacklist_tweets(
+        self, synapse: talisman_ai.protocol.TweetBatch
+    ) -> typing.Tuple[bool, str]:
         if synapse.dendrite is None or synapse.dendrite.hotkey is None:
             bt.logging.warning(
                 "Received a request without a dendrite or hotkey."
@@ -195,10 +198,106 @@ class BaseValidatorNeuron(BaseNeuron):
             f"Not Blacklisting recognized hotkey {synapse.dendrite.hotkey}"
         )
         return False, "Hotkey recognized!"
+
+    async def blacklist_validator_rewards(
+        self, synapse: ValidatorRewards
+    ) -> typing.Tuple[bool, str]:
+        if synapse.dendrite is None or synapse.dendrite.hotkey is None:
+            bt.logging.warning(
+                "Received a request without a dendrite or hotkey."
+            )
+            return True, "Missing dendrite or hotkey"
+
+        # TODO(developer): Define how miners should blacklist requests.
+        # Check if hotkey is registered BEFORE trying to get its index
+        if (
+            not self.config.blacklist.allow_non_registered
+            and synapse.dendrite.hotkey not in self.metagraph.hotkeys
+        ):
+            # Ignore requests from un-registered entities.
+            bt.logging.trace(
+                f"Blacklisting un-registered hotkey {synapse.dendrite.hotkey}"
+            )
+            return True, "Unrecognized hotkey"
+
+        # Only get uid if hotkey is in metagraph (to avoid IndexError)
+        try:
+            uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
+        except ValueError:
+            # Hotkey not found in metagraph (shouldn't happen if check above passed, but be safe)
+            bt.logging.warning(f"Hotkey {synapse.dendrite.hotkey} not found in metagraph")
+            return True, "Hotkey not in metagraph"
+
+        if self.config.blacklist.force_validator_permit:
+            # If the config is set to force validator permit, then we should only allow requests from validators.
+            if not self.metagraph.validator_permit[uid]:
+                bt.logging.warning(
+                    f"Blacklisting a request from non-validator hotkey {synapse.dendrite.hotkey}"
+                )
+                return True, "Non-validator hotkey"
+
+        bt.logging.trace(
+            f"Not Blacklisting recognized hotkey {synapse.dendrite.hotkey}"
+        )
+        return False, "Hotkey recognized!"
+
+    async def blacklist_validator_penalties(
+        self, synapse: ValidatorPenalties
+    ) -> typing.Tuple[bool, str]:
+        if synapse.dendrite is None or synapse.dendrite.hotkey is None:
+            bt.logging.warning(
+                "Received a request without a dendrite or hotkey."
+            )
+            return True, "Missing dendrite or hotkey"
+
+        # TODO(developer): Define how miners should blacklist requests.
+        # Check if hotkey is registered BEFORE trying to get its index
+        if (
+            not self.config.blacklist.allow_non_registered
+            and synapse.dendrite.hotkey not in self.metagraph.hotkeys
+        ):
+            # Ignore requests from un-registered entities.
+            bt.logging.trace(
+                f"Blacklisting un-registered hotkey {synapse.dendrite.hotkey}"
+            )
+            return True, "Unrecognized hotkey"
+
+        # Only get uid if hotkey is in metagraph (to avoid IndexError)
+        try:
+            uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
+        except ValueError:
+            # Hotkey not found in metagraph (shouldn't happen if check above passed, but be safe)
+            bt.logging.warning(f"Hotkey {synapse.dendrite.hotkey} not found in metagraph")
+            return True, "Hotkey not in metagraph"
+
+        if self.config.blacklist.force_validator_permit:
+            # If the config is set to force validator permit, then we should only allow requests from validators.
+            if not self.metagraph.validator_permit[uid]:
+                bt.logging.warning(
+                    f"Blacklisting a request from non-validator hotkey {synapse.dendrite.hotkey}"
+                )
+                return True, "Non-validator hotkey"
+
+        bt.logging.trace(
+            f"Not Blacklisting recognized hotkey {synapse.dendrite.hotkey}"
+        )
+        return False, "Hotkey recognized!"
     
     async def priority_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> float:
         """
         Priority tweets to the network.
+        """
+        return 1.0
+
+    async def priority_validator_rewards(self, synapse: ValidatorRewards) -> float:
+        """
+        Priority validator rewards to the network.
+        """
+        return 1.0
+
+    async def priority_validator_penalties(self, synapse: ValidatorPenalties) -> float:
+        """
+        Priority validator penalties to the network.
         """
         return 1.0
     

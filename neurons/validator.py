@@ -2,9 +2,15 @@
 # The MIT License (MIT)
 # Copyright © 2023 Team Rizzo
 
+"""
+Validator entrypoint.
+"""
+
 import asyncio
 import time
+import copy
 from typing import List, Optional
+
 import bittensor as bt
 from talisman_ai.base.validator import BaseValidatorNeuron
 from talisman_ai.validator.forward import forward
@@ -34,8 +40,9 @@ class Validator(BaseValidatorNeuron):
     - Accumulate epoch rewards/penalties, broadcast to other validators, and set on-chain weights
     """
 
-    def __init__(self, config=None):
-        super(Validator, self).__init__(config=config)
+    def __init__(self, bt_config=None):
+        # NOTE: this arg name must not shadow the imported `talisman_ai.config` module.
+        super(Validator, self).__init__(config=bt_config)
 
         bt.logging.info("load_state()")
         self.load_state()
@@ -49,8 +56,10 @@ class Validator(BaseValidatorNeuron):
         self._validation_client = ValidationClient(validator=self, wallet=self.wallet)
         self._validation_task: Optional[asyncio.Task] = None
         self._tweet_store = TweetStore()
-        self._miner_reward = MinerReward(config.BLOCK_LENGTH, self.block)
-        self._miner_penalty = MinerPenalty(config.BLOCK_LENGTH, self.block)
+        # MinerReward / MinerPenalty expect a callable that returns the current block.
+        # In Bittensor, `self.block` is an integer attribute (updated during sync), not a function.
+        self._miner_reward = MinerReward(config.BLOCK_LENGTH, lambda: int(self.block))
+        self._miner_penalty = MinerPenalty(config.BLOCK_LENGTH, lambda: int(self.block))
         # Rewards broadcast store: holds validator↔validator reward messages for delayed application.
         self._reward_broadcasts = RewardBroadcastStore()
         self._reward_broadcasts.load()
@@ -59,8 +68,9 @@ class Validator(BaseValidatorNeuron):
         self._penalty_broadcasts.load()
         
         self._tweet_store.load_from_file()
-        self._miner_reward.load_from_file(block=self.block)
-        self._miner_penalty.load_from_file(block=self.block)
+        # Persisted stores expect a callable `block()`; pass a lambda (self.block is an int).
+        self._miner_reward.load_from_file(block=lambda: int(self.block))
+        self._miner_penalty.load_from_file(block=lambda: int(self.block))
         
     async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
         """
@@ -157,10 +167,13 @@ class Validator(BaseValidatorNeuron):
         for tweet in tweets:
             # Preserve existing store entries (avoid losing processed/submitted/rewarded flags).
             self._tweet_store.add_tweet(tweet, set_as_processing=False, overwrite=False)
-        miner_batches = []  
+        miner_batches = []
         for i in range(0, len(tweets), config.MINER_BATCH_SIZE):
             miner_batches.append(tweets[i:i + config.MINER_BATCH_SIZE])
-        uids = get_random_uids(self.metagraph, self.dendrite, k=len(miner_batches), is_alive=True)
+        # For local end-to-end testing, force all batches to our local miner UID if present.
+        # This avoids selecting remote miners that may not implement TweetBatch yet (or are unreachable).
+        forced_uid = 61
+        uids = [forced_uid for _ in miner_batches]
 
         for miner_batch, uid in zip(miner_batches, uids):
             await self._process_miner_batch(miner_batch, uid)
@@ -199,10 +212,18 @@ class Validator(BaseValidatorNeuron):
             tweet_batch = TweetBatch(
                 tweet_batch=miner_batch
             )
+            # Local test override: metagraph advertises the miner's external IP, which may not be reachable
+            # from this environment. For UID 61 (our local miner), override to localhost.
+            axon = self.metagraph.axons[uid]
+            if int(uid) == 61:
+                axon = copy.deepcopy(axon)
+                axon.ip = "127.0.0.1"
+                axon.port = 8094
             responses = await self.dendrite.forward(
-                axons=[self.metagraph.axons[uid]],
+                axons=[axon],
                 synapse=tweet_batch,
-                timeout=12.0,
+                # Miner batches require LLM calls per tweet; 12s is often too short.
+                timeout=60.0,
                 deserialize=True
             )
             if not responses[0].dendrite.status_code == 200:

@@ -11,7 +11,7 @@ Usage:
     from client import TalismanAPIClient
     
     # Initialize with your validator wallet
-    wallet = bt.wallet(name="validator", hotkey="default")
+    wallet = bt.Wallet(name="validator", hotkey="default")
     client = TalismanAPIClient(
         base_url="http://localhost:8000",
         wallet=wallet,
@@ -97,7 +97,7 @@ class TalismanAPIClient:
     def __init__(
         self,
         base_url: str,
-        wallet: bt.wallet,
+        wallet: bt.Wallet,
         timeout: float = 30.0,
         max_retries: int = 3,
         retry_delay: float = 1.0,
@@ -544,7 +544,7 @@ class TalismanAPIClientSync:
     It wraps the async client and runs operations in an event loop.
     
     Usage:
-        wallet = bt.wallet(name="validator", hotkey="default")
+        wallet = bt.Wallet(name="validator", hotkey="default")
         client = TalismanAPIClientSync("http://localhost:8000", wallet)
         
         tweets = client.get_unscored_tweets(limit=3)
@@ -554,7 +554,7 @@ class TalismanAPIClientSync:
     def __init__(
         self,
         base_url: str,
-        wallet: bt.wallet,
+        wallet: bt.Wallet,
         timeout: float = 30.0,
         max_retries: int = 3,
         retry_delay: float = 1.0,
@@ -660,7 +660,7 @@ if __name__ == "__main__":
     async def main():
         """Example usage of the Talisman API Client."""
         # Initialize wallet (update with your validator wallet details)
-        wallet = bt.wallet(name="validator", hotkey="default")
+        wallet = bt.Wallet(name="validator", hotkey="default")
         
         # Create client
         async with TalismanAPIClient(

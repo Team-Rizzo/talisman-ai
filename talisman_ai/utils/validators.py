@@ -35,8 +35,8 @@ def _defaults():
 
 def get_validator_data(
     *,
-    metagraph: Optional["bt.metagraph.Metagraph"] = None,
-    subtensor: Optional["bt.subtensor"] = None,
+    metagraph: Optional["bt.Metagraph"] = None,
+    subtensor: Optional["bt.Subtensor"] = None,
     netuid: Optional[int] = None,
     stake_threshold: Optional[float] = None,
     cache_seconds: Optional[float] = None,
@@ -60,7 +60,12 @@ def get_validator_data(
             try:
                 if metagraph is None:
                     if subtensor is None:
-                        subtensor = bt.subtensor(config=getattr(config, "bt_config", None)) if hasattr(config, "bt_config") else bt.subtensor()
+                        # bittensor v10: Subtensor is a class (old bt.subtensor() helper removed).
+                        subtensor = (
+                            bt.Subtensor(config=getattr(config, "bt_config", None))
+                            if hasattr(config, "bt_config")
+                            else bt.Subtensor()
+                        )
                     if netuid is None:
                         raise ValueError("netuid must be provided if metagraph is not provided")
                     metagraph = subtensor.metagraph(netuid)
@@ -89,8 +94,8 @@ def get_validator_data(
 
 def get_validator_hotkeys(
     *,
-    metagraph: Optional["bt.metagraph.Metagraph"] = None,
-    subtensor: Optional["bt.subtensor"] = None,
+    metagraph: Optional["bt.Metagraph"] = None,
+    subtensor: Optional["bt.Subtensor"] = None,
     netuid: Optional[int] = None,
     stake_threshold: Optional[float] = None,
     cache_seconds: Optional[float] = None,
