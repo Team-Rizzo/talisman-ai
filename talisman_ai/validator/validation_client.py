@@ -65,93 +65,92 @@ class ValidationClient:
             on_tweets: Callback for batch of tweets (async or sync)
         """
         self._running = True
-        bt.logging.info(f"[VALIDATION] Starting validation client (poll_interval={self.poll_seconds}s, scores_interval={self.scores_block_interval} blocks)")
+        bt.logging.info("[ValidationClient.run] Entering main validation loop (poll_interval=%ss, scores_interval=%s blocks)", self.poll_seconds, self.scores_block_interval)
 
         try:
             while self._running:
+                bt.logging.debug("[ValidationClient.run] Top of poll loop")
                 try:
-                    # Check if we need to fetch scores (based on API's current window)
+                    bt.logging.debug("[ValidationClient.run] Checking for timed-out tweets")
                     timed_out_tweets = self._validator._tweet_store.get_timeouts()
                     for tweet in timed_out_tweets:
+                        bt.logging.debug(f"[ValidationClient.run] Resetting timed out tweet {tweet.tweet.id} to unprocessed")
                         self._validator._tweet_store.reset_to_unprocessed(tweet.tweet.id)
-                        # Penalize the miner if we know who owned this processing attempt.
                         if tweet.hotkey:
+                            bt.logging.info(f"[ValidationClient.run] Adding penalty to hotkey {tweet.hotkey} for tweet id {tweet.tweet.id}")
                             self._validator._miner_penalty.add_penalty(tweet.hotkey, 1)
-                        # Penalties intentionally ignored in the rewards-only commitments rollout.
-                        # Also: submit_penalties is async; leaving this commented avoids un-awaited coroutine warnings.
-                        # await self.api_client.submit_penalties([PenaltyCreate(
-                        #     hotkey=tweet.hotkey,
-                        #     reason="Timeout",
-                        # )])
+                    bt.logging.debug("[ValidationClient.run] Fetching unscored tweets from api and local store")
                     unscored_tweets = (await self.api_client.get_unscored_tweets(limit=config.MINER_BATCH_SIZE)) + [tweet.tweet for tweet in self._validator._tweet_store.get_unprocessed_tweets()]
-                    
                 except Exception as e:
-                    bt.logging.warning(f"[VALIDATION] Failed to fetch unscored tweets: {e}")
+                    bt.logging.warning(f"[ValidationClient.run] Failed to fetch unscored tweets: {e}")
                     continue
 
                 if unscored_tweets:
+                    bt.logging.debug(f"[ValidationClient.run] Passing {len(unscored_tweets)} unscored tweets to on_tweets() callback")
                     maybe_coro = on_tweets(unscored_tweets)
                     if asyncio.iscoroutine(maybe_coro):
+                        bt.logging.debug("[ValidationClient.run] Awaiting on_tweets coroutine")
                         await maybe_coro
-                
-                # Submit tweets that are processed locally but not yet submitted to the API.
+
+                # Submit tweets processed locally but not yet submitted to the API.
                 ready = self._validator._tweet_store.get_ready_to_submit()
+                bt.logging.debug(f"[ValidationClient.run] Checking {len(ready) if ready else 0} tweets ready to submit to API")
                 if ready:
-                    # Submit in small batches; mark submitted only on success.
                     for item in ready:
                         try:
+                            bt.logging.debug(f"[ValidationClient.run] Submitting tweet {item.tweet.id} to API")
                             await self._validator._submit_tweet_batch([item.tweet])
                             self._validator._tweet_store.mark_submitted(item.tweet.id)
-                            # Remove from store after successful submission to avoid resubmission loops.
                             self._validator._tweet_store.delete_tweet(item.tweet.id)
+                            bt.logging.info(f"[ValidationClient.run] Successfully submitted tweet {item.tweet.id} and removed it from store")
                         except Exception as e:
-                            bt.logging.warning(f"[VALIDATION] Failed to submit completed tweet {item.tweet.id}: {e}")
-                            # Leave it in store for retry.
+                            bt.logging.warning(f"[ValidationClient.run] Failed to submit completed tweet {item.tweet.id}: {e}")
                             continue
 
-                # Persist local state so rewards/submission idempotency survives restarts.
+                # Persist local state.
                 try:
+                    bt.logging.debug("[ValidationClient.run] Saving tweet store to disk")
                     self._validator._tweet_store.save_to_file()
                 except Exception as e:
-                    bt.logging.debug(f"[VALIDATION] Failed to persist tweet store: {e}")
-                
+                    bt.logging.debug(f"[ValidationClient.run] Failed to persist tweet store: {e}")
+
+                # ---- Broadcast rewards + penalties to other validators ----
                 current_epoch = self._validator._miner_reward._get_current_epoch()
                 publish_epoch = current_epoch - 1
+                bt.logging.debug(f"[ValidationClient.run] current_epoch={current_epoch} publish_epoch={publish_epoch} last_publish_epoch={self._last_publish_epoch}")
                 try:
-                    # Broadcast a single-epoch rewards snapshot to other validators (typically E-1).
-                    # This replaces knowledge commitments (which are overwrite-only and tiny).
                     if publish_epoch >= 0 and self._last_publish_epoch != int(publish_epoch):
-                        # Convert hotkey->points to uid->points for compactness.
-                        # NOTE: on fresh start/restart we may not have an E-1 bucket yet; treat that as empty.
+                        bt.logging.info(f"[ValidationClient.run] Preparing to broadcast for epoch={publish_epoch}")
                         try:
                             hotkey_points = self._validator._miner_reward.get_rewards(epoch=publish_epoch)
                         except KeyError:
                             hotkey_points = {}
-                            bt.logging.info(
+                            bt.logging.info((
                                 f"[BROADCAST] No local rewards bucket for epoch={publish_epoch} yet "
                                 f"(startup/restart). Publishing empty rewards snapshot."
-                            )
+                            ))
                         uid_points = {}
                         for hk, pts in hotkey_points.items():
                             if hk in self._validator.metagraph.hotkeys:
                                 uid = self._validator.metagraph.hotkeys.index(hk)
                                 uid_points[uid] = int(pts)
-                        
-                        # Also get penalties for broadcasting.
                         try:
                             hotkey_penalties = self._validator._miner_penalty.get_penalties(epoch=publish_epoch)
                         except KeyError:
                             hotkey_penalties = {}
-                            bt.logging.info(
+                            bt.logging.info((
                                 f"[BROADCAST] No local penalties bucket for epoch={publish_epoch} yet "
                                 f"(startup/restart). Publishing empty penalties snapshot."
-                            )
+                            ))
                         uid_penalties = {}
                         for hk, cnt in hotkey_penalties.items():
                             if hk in self._validator.metagraph.hotkeys:
                                 uid = self._validator.metagraph.hotkeys.index(hk)
                                 uid_penalties[uid] = int(cnt)
-                        
+
+                        bt.logging.debug(f"[ValidationClient.run] uid_points for broadcast: {uid_points}")
+                        bt.logging.debug(f"[ValidationClient.run] uid_penalties for broadcast: {uid_penalties}")
+
                         rewards_syn = ValidatorRewards(
                             epoch=int(publish_epoch),
                             uid_points=uid_points,
@@ -168,14 +167,13 @@ class ValidationClient:
                             f"[BROADCAST] Preparing publish epoch={publish_epoch} "
                             f"uid_points={len(uid_points)} uid_penalties={len(uid_penalties)}"
                         )
-                        # Fan out to whitelisted validator hotkeys (permit + stake threshold),
-                        # bounded by VALIDATOR_BROADCAST_MAX_TARGETS.
                         whitelist = set(
                             get_validator_hotkeys(
                                 metagraph=self._validator.metagraph,
                                 netuid=self._validator.config.netuid,
                             )
                         )
+                        bt.logging.debug(f"[ValidationClient.run] Built validator whitelist of {len(whitelist)} entries")
                         axons = []
                         for uid in range(int(self._validator.metagraph.n.item())):
                             if uid == int(self._validator.uid):
@@ -190,15 +188,18 @@ class ValidationClient:
                                 axons.append(ax)
                             except Exception:
                                 continue
+                        bt.logging.info(f"[ValidationClient.run] Found {len(axons)} whitelisted validator axons for broadcast")
                         max_targets = int(getattr(config, "VALIDATOR_BROADCAST_MAX_TARGETS", 32))
                         if max_targets > 0 and len(axons) > max_targets:
+                            # log before sampling
+                            bt.logging.info(f"[ValidationClient.run] Reducing broadcast axons from {len(axons)} to {max_targets}")
                             axons = random.sample(axons, max_targets)
                         if axons:
                             bt.logging.info(
                                 f"[BROADCAST] Publishing epoch={publish_epoch} to {len(axons)} validator axon(s) "
                                 f"(whitelist={len(whitelist)}, max_targets={max_targets})"
                             )
-                            # Broadcast both rewards and penalties.
+                            bt.logging.debug(f"[ValidationClient.run] Broadcasting rewards_syn to axons")
                             await self._validator.dendrite.forward(
                                 axons=axons,
                                 synapse=rewards_syn,
@@ -206,6 +207,7 @@ class ValidationClient:
                                 deserialize=True,
                             )
                             if uid_penalties:
+                                bt.logging.debug(f"[ValidationClient.run] Broadcasting penalties_syn to axons")
                                 await self._validator.dendrite.forward(
                                     axons=axons,
                                     synapse=penalties_syn,
@@ -217,70 +219,89 @@ class ValidationClient:
                                 f"[BROADCAST] Skipping publish epoch={publish_epoch}: "
                                 f"no target validator axons (whitelist={len(whitelist)})"
                             )
-                        # Mark this epoch as attempted so we don't retry every poll loop.
                         self._last_publish_epoch = int(publish_epoch)
                 except Exception as e:
-                    bt.logging.debug(f"[BROADCAST] Publish failed: {e}")
+                    bt.logging.debug(f"[ValidationClient.run] [BROADCAST] Publish failed: {e}")
 
-                # Apply rewards for epoch E-2.
+                # ---- Aggregate rewards/penalties and update scores ----
                 target_epoch = current_epoch - 2
-
-                # Combine local and broadcasted rewards (summing them together).
+                bt.logging.debug(f"[ValidationClient.run] Calculating weights and scores for target_epoch={target_epoch}")
                 combined_uid_rewards: Dict[int, int] = {}
-                
-                # Get local rewards (keyed by hotkey) and convert to uid->points.
+
+                # Local rewards to uid->points
                 try:
                     local_rewards_map = self._validator._miner_reward.get_rewards(epoch=target_epoch)
+                    bt.logging.debug(f"[ValidationClient.run] Retrieved local_rewards_map: {local_rewards_map}")
                     for hk, pts in local_rewards_map.items():
                         if hk in self._validator.metagraph.hotkeys:
                             uid = self._validator.metagraph.hotkeys.index(hk)
                             combined_uid_rewards[uid] = combined_uid_rewards.get(uid, 0) + int(pts)
                 except Exception as e:
-                    bt.logging.debug(f"[REWARDS] Failed to get local rewards: {e}")
-                
-                # Get broadcasted rewards and combine.
+                    bt.logging.debug(f"[ValidationClient.run] [REWARDS] Failed to get local rewards: {e}")
+
+                bt.logging.info(f"[REWARDS] Local rewards: {combined_uid_rewards}")
+
+                # Broadcasted rewards
                 try:
                     broadcast_uid_rewards = self._validator._reward_broadcasts.aggregate_epoch(target_epoch)
+                    bt.logging.debug(f"[ValidationClient.run] Aggregated broadcast_uid_rewards: {broadcast_uid_rewards}")
                     for uid, pts in broadcast_uid_rewards.items():
                         combined_uid_rewards[uid] = combined_uid_rewards.get(uid, 0) + int(pts)
                 except Exception as e:
-                    bt.logging.debug(f"[BROADCAST] Failed to aggregate rewards: {e}")
+                    bt.logging.debug(f"[ValidationClient.run] [BROADCAST] Failed to aggregate rewards: {e}")
 
-                # Get penalized UIDs from both local and broadcasted penalties.
+                bt.logging.info(f"[REWARDS] Broadcasted rewards: {broadcast_uid_rewards}")
+
+                # Penalized UIDs: local and broadcast
                 penalized_uids: set = set()
-                
-                # Get local penalties.
                 try:
                     local_penalties = self._validator._miner_penalty.get_penalties(epoch=target_epoch)
+                    bt.logging.debug(f"[ValidationClient.run] Retrieved local_penalties: {local_penalties}")
                     for hk, cnt in local_penalties.items():
                         if cnt > 0 and hk in self._validator.metagraph.hotkeys:
                             uid = self._validator.metagraph.hotkeys.index(hk)
                             penalized_uids.add(uid)
                 except Exception as e:
-                    bt.logging.debug(f"[PENALTIES] Failed to get local penalties: {e}")
-                
-                # Get broadcasted penalties.
+                    bt.logging.debug(f"[ValidationClient.run] [PENALTIES] Failed to get local penalties: {e}")
+
+                # bt.logging.info(f"[PENALTIES] Local penalties: {local_penalties}")
+
                 try:
                     broadcast_penalized = self._validator._penalty_broadcasts.get_penalized_uids(target_epoch)
+                    bt.logging.debug(f"[ValidationClient.run] Aggregated broadcast_penalized: {broadcast_penalized}")
                     penalized_uids.update(broadcast_penalized)
                 except Exception as e:
-                    bt.logging.debug(f"[PENALTY_BROADCAST] Failed to aggregate penalties: {e}")
+                    bt.logging.debug(f"[ValidationClient.run] [PENALTY_BROADCAST] Failed to aggregate penalties: {e}")
 
-                # Build rewards list, setting reward to 0 for penalized miners.
+                # bt.logging.info(f"[PENALTY_BROADCAST] Broadcasted penalties: {broadcast_penalized}")
+
+                # Build rewards list, zero for penalized
                 rewards = []
+                bt.logging.debug(f"[ValidationClient.run] Building rewards list, penalized_uids: {penalized_uids}")
                 for uid, pts in combined_uid_rewards.items():
                     try:
                         hk = self._validator.metagraph.hotkeys[int(uid)]
                     except Exception:
+                        bt.logging.debug(f"[ValidationClient.run] Could not resolve hotkey for UID={uid}, skipping.")
                         continue
                     if uid in penalized_uids:
                         bt.logging.info(f"[PENALTIES] Zeroing reward for penalized miner UID={uid} hotkey={hk[:12]}...")
                         rewards.append(Reward(hotkey=hk, reward=0, epoch=target_epoch))
                     else:
                         rewards.append(Reward(hotkey=hk, reward=int(pts), epoch=target_epoch))
+                bt.logging.debug(f"[ValidationClient.run] Calculating weights from rewards list (len={len(rewards)})")
                 weights = calculate_weights(rewards, self._validator.metagraph)
+                # bt.logging.info(f"[REWARDS] Weights: {weights}")
+                bt.logging.debug(f"[ValidationClient.run] Updating scores with new weights")
                 self._validator.update_scores(weights, self._validator.metagraph.uids.tolist())
+                bt.logging.debug(f"[ValidationClient.run] Sleeping for {self.poll_seconds} seconds before next poll loop")
+                
+                self._validator._penalty_broadcasts.save()
+                self._validator._reward_broadcasts.save()
+                self._validator._tweet_store.save_to_file()
+                self._validator._miner_reward.save()
+                self._validator._miner_penalty.save()
+                
                 await asyncio.sleep(float(self.poll_seconds))
         except Exception as e:
-            bt.logging.error(f"[VALIDATION] Failed to run validation client: {e}", exc_info=True)
-            
+            bt.logging.error(f"[ValidationClient.run] Failed to run validation client: {e}", exc_info=True)
