@@ -241,7 +241,7 @@ class Validator(BaseValidatorNeuron):
                         pass
                 return None
 
-            await self._handle_miner_batch_response(response_syn.tweet_batch, miner_hotkey, miner_batch)
+            # await self._handle_miner_batch_response(response_syn.tweet_batch, miner_hotkey, miner_batch)
             return response_syn
         except Exception as e:
             bt.logging.error(f"[VALIDATION] Failed to process miner batch: {e}", exc_info=True)

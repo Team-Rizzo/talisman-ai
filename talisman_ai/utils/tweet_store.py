@@ -262,6 +262,16 @@ class TweetStore:
             del self._tweets[tweet_id]
         else:
             raise KeyError(f"Tweet ID {tweet_id} not found")
+
+    def get_tweet_by_id(self, tweet_id: str) -> Optional[TweetWithAuthor]:
+        """
+        Returns the tweet with the given ID, if it exists.
+        """
+        tweet_id = str(tweet_id)
+        if tweet_id in self._tweets:
+            return self._tweets[tweet_id].tweet
+        else:
+            return None
     
     def save_to_file(self, file_path: Optional[str] = None):
         """

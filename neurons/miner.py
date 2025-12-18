@@ -1,5 +1,8 @@
 import time
 import typing
+import threading
+import copy
+import asyncio
 import bittensor as bt
 
 # Bittensor Miner Template:
@@ -26,6 +29,9 @@ class Miner(BaseMinerNeuron):
         bt.logging.info("[Miner] Initializing analyzer...")
         self.analyzer = setup_analyzer()
         bt.logging.info("[Miner] Analyzer initialized")
+        
+        # Initialize dendrite for sending responses back to validators
+        self.dendrite = bt.Dendrite(wallet=self.wallet)
 
         # IMPORTANT: Register a concrete TweetBatch handler on the axon.
         # Bittensor routes requests by synapse class name; attaching only `forward(self, bt.Synapse)`
@@ -76,41 +82,102 @@ class Miner(BaseMinerNeuron):
         """
         Processes TweetBatch requests from validators.
         
-        Analyzes each tweet in the batch and enriches it with classification data.
+        Spawns a background thread to analyze tweets and send results back to the validator.
+        Returns immediately to avoid blocking the axon.
         
         Args:
             synapse: TweetBatch containing list of tweets to analyze
             
         Returns:
-            TweetBatch with enriched tweets (analysis field populated)
+            TweetBatch (returns immediately, processing happens in background)
         """
-        bt.logging.info(f"[Miner] Received TweetBatch with {len(synapse.tweet_batch)} tweet(s)")
+        validator_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
+        bt.logging.info(f"[Miner] Received TweetBatch with {len(synapse.tweet_batch)} tweet(s) from validator {validator_hotkey}")
         
-        for tweet in synapse.tweet_batch:
-            if not tweet.text:
-                bt.logging.warning(f"[Miner] Skipping tweet {tweet.id} - no text content")
-                continue
-            
-            # Classify the tweet
-            classification = self.analyzer.classify_post(tweet.text)
-            
-            if classification is None:
-                bt.logging.warning(f"[Miner] Failed to classify tweet {tweet.id}")
-                continue
-            
-            # Create analysis object with required fields for validator
-            tweet.analysis = TweetAnalysisBase(
-                sentiment=classification.sentiment.value,
-                subnet_id=classification.subnet_id,
-                subnet_name=classification.subnet_name,
-                content_type=classification.content_type.value,
-                technical_quality=classification.technical_quality.value,
-                market_analysis=classification.market_analysis.value,
-                impact_potential=classification.impact_potential.value,
-            )
+        if not validator_hotkey:
+            bt.logging.warning("[Miner] No validator hotkey found in synapse, cannot send response back")
+            return synapse
         
-        bt.logging.info(f"[Miner] Processed TweetBatch - returning enriched tweets")
+        # Make a deep copy of the synapse for background processing
+        synapse_copy = copy.deepcopy(synapse)
+        
+        # Start background thread for processing and sending response
+        thread = threading.Thread(
+            target=self._process_and_send_tweets,
+            args=(synapse_copy, validator_hotkey),
+            daemon=True
+        )
+        thread.start()
+        
+        bt.logging.info(f"[Miner] Started background processing for TweetBatch, returning immediately")
         return synapse
+
+    def _process_and_send_tweets(self, synapse: talisman_ai.protocol.TweetBatch, validator_hotkey: str):
+        """
+        Background thread function to process tweets and send results back to validator.
+        
+        Args:
+            synapse: TweetBatch to process
+            validator_hotkey: Hotkey of the validator to send results back to
+        """
+        try:
+            bt.logging.info(f"[Miner] Background: Processing {len(synapse.tweet_batch)} tweets")
+            
+            # Process each tweet
+            for tweet in synapse.tweet_batch:
+                if not tweet.text:
+                    bt.logging.warning(f"[Miner] Skipping tweet {tweet.id} - no text content")
+                    continue
+                
+                # Classify the tweet
+                classification = self.analyzer.classify_post(tweet.text)
+                
+                if classification is None:
+                    bt.logging.warning(f"[Miner] Failed to classify tweet {tweet.id}")
+                    continue
+                
+                # Create analysis object with required fields for validator
+                tweet.analysis = TweetAnalysisBase(
+                    sentiment=classification.sentiment.value,
+                    subnet_id=classification.subnet_id,
+                    subnet_name=classification.subnet_name,
+                    content_type=classification.content_type.value,
+                    technical_quality=classification.technical_quality.value,
+                    market_analysis=classification.market_analysis.value,
+                    impact_potential=classification.impact_potential.value,
+                )
+            
+            bt.logging.info(f"[Miner] Background: Finished processing, sending back to validator {validator_hotkey}")
+            
+            # Find validator UID and axon info from metagraph
+            try:
+                validator_uid = self.metagraph.hotkeys.index(validator_hotkey)
+            except ValueError:
+                bt.logging.error(f"[Miner] Validator hotkey {validator_hotkey} not found in metagraph")
+                return
+            
+            validator_axon = self.metagraph.axons[validator_uid]
+            bt.logging.info(f"[Miner] Background: Found validator UID {validator_uid}, sending response via dendrite")
+            
+            # Send the processed batch back to the validator
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                response = loop.run_until_complete(
+                    self.dendrite.forward(
+                        axons=[validator_axon],
+                        synapse=synapse,
+                        timeout=30.0,
+                    )
+                )
+                bt.logging.info(f"[Miner] Background: Successfully sent processed TweetBatch back to validator {validator_hotkey}")
+            except Exception as e:
+                bt.logging.error(f"[Miner] Background: Failed to send response to validator: {e}")
+            finally:
+                loop.close()
+                
+        except Exception as e:
+            bt.logging.error(f"[Miner] Background: Error processing tweets: {e}")
 
 
     async def forward_score(self, synapse: talisman_ai.protocol.Score) -> talisman_ai.protocol.Score:
