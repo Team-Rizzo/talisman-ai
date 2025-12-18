@@ -334,7 +334,7 @@ class TalismanAPIClient:
             if isinstance(item, dict):
                 submissions.append(item)
             else:
-                submissions.append({"tweet_id": item.tweet_id, "sentiment": item.sentiment})
+                submissions.append(item.model_dump(exclude_none=True))
         
         data = await self._request(
             "POST",

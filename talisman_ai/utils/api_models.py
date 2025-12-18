@@ -322,6 +322,14 @@ class CompletedTweetSubmission(BaseModel):
     """Model for submitting a completed scored tweet."""
     tweet_id: int
     sentiment: str
+    # Optional richer classification fields (backward compatible with sentiment-only submissions)
+    subnet_id: Optional[int] = None
+    subnet_name: Optional[str] = None
+    content_type: Optional[str] = None
+    technical_quality: Optional[str] = None
+    market_analysis: Optional[str] = None
+    impact_potential: Optional[str] = None
+    relevance_confidence: Optional[str] = None
 
 
 class CompletedTweetsSubmission(BaseModel):

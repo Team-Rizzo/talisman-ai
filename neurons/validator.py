@@ -256,12 +256,26 @@ class Validator(BaseValidatorNeuron):
         """Submit a tweet batch to the API"""
         completed_tweets = []
         for tweet in tweet_batch:
-            # Get sentiment from analysis if available, otherwise default to neutral
-            sentiment = tweet.analysis.sentiment if tweet.analysis and tweet.analysis.sentiment else "neutral"
-            completed_tweets.append(CompletedTweetSubmission(
-                tweet_id=tweet.id,
-                sentiment=sentiment
-            ))
+            # Miner responses are expected to always include analysis.
+            if tweet.analysis is None:
+                bt.logging.warning(
+                    f"[VALIDATION] Skipping tweet {tweet.id} in submission: missing miner analysis"
+                )
+                continue
+
+            completed_tweets.append(
+                CompletedTweetSubmission(
+                    tweet_id=tweet.id,
+                    sentiment=tweet.analysis.sentiment or "neutral",
+                    subnet_id=tweet.analysis.subnet_id,
+                    subnet_name=tweet.analysis.subnet_name,
+                    content_type=tweet.analysis.content_type,
+                    technical_quality=tweet.analysis.technical_quality,
+                    market_analysis=tweet.analysis.market_analysis,
+                    impact_potential=tweet.analysis.impact_potential,
+                    relevance_confidence=getattr(tweet.analysis, "relevance_confidence", None),
+                )
+            )
         response = await self._validation_client.api_client.submit_completed_tweets(completed_tweets)
         return response
 
