@@ -8,7 +8,6 @@ Validator entrypoint.
 
 import asyncio
 import time
-import copy
 from typing import List, Optional
 
 import bittensor as bt
@@ -170,10 +169,9 @@ class Validator(BaseValidatorNeuron):
         miner_batches = []
         for i in range(0, len(tweets), config.MINER_BATCH_SIZE):
             miner_batches.append(tweets[i:i + config.MINER_BATCH_SIZE])
-        # For local end-to-end testing, force all batches to our local miner UID if present.
-        # This avoids selecting remote miners that may not implement TweetBatch yet (or are unreachable).
-        forced_uid = 61
-        uids = [forced_uid for _ in miner_batches]
+        # Select miners from the metagraph for each batch (exclude ourselves).
+        # NOTE: get_random_uids() already filters to serving axons and applies vpermit limits.
+        uids = list(get_random_uids(self, k=len(miner_batches), exclude=[int(self.uid)]))
 
         for miner_batch, uid in zip(miner_batches, uids):
             await self._process_miner_batch(miner_batch, uid)
@@ -212,13 +210,7 @@ class Validator(BaseValidatorNeuron):
             tweet_batch = TweetBatch(
                 tweet_batch=miner_batch
             )
-            # Local test override: metagraph advertises the miner's external IP, which may not be reachable
-            # from this environment. For UID 61 (our local miner), override to localhost.
             axon = self.metagraph.axons[uid]
-            if int(uid) == 61:
-                axon = copy.deepcopy(axon)
-                axon.ip = "127.0.0.1"
-                axon.port = 8094
             responses = await self.dendrite.forward(
                 axons=[axon],
                 synapse=tweet_batch,
