@@ -48,6 +48,8 @@ class ValidationClient:
         )
         self._running: bool = False
         self._validator = validator
+        # Avoid spamming broadcasts: publish at most once per chain epoch.
+        self._last_publish_epoch: Optional[int] = None
         # Loop cadence. Keep defaults aligned with config.
         self.poll_seconds = poll_seconds if poll_seconds is not None else config.VALIDATION_POLL_SECONDS
         self.scores_block_interval = scores_block_interval if scores_block_interval is not None else config.SCORES_BLOCK_INTERVAL
@@ -114,13 +116,21 @@ class ValidationClient:
                     bt.logging.debug(f"[VALIDATION] Failed to persist tweet store: {e}")
                 
                 current_epoch = self._validator._miner_reward._get_current_epoch()
+                publish_epoch = current_epoch - 1
                 try:
                     # Broadcast a single-epoch rewards snapshot to other validators (typically E-1).
                     # This replaces knowledge commitments (which are overwrite-only and tiny).
-                    publish_epoch = current_epoch - 1
-                    if publish_epoch >= 0:
+                    if publish_epoch >= 0 and self._last_publish_epoch != int(publish_epoch):
                         # Convert hotkey->points to uid->points for compactness.
-                        hotkey_points = self._validator._miner_reward.get_rewards(epoch=publish_epoch)
+                        # NOTE: on fresh start/restart we may not have an E-1 bucket yet; treat that as empty.
+                        try:
+                            hotkey_points = self._validator._miner_reward.get_rewards(epoch=publish_epoch)
+                        except KeyError:
+                            hotkey_points = {}
+                            bt.logging.info(
+                                f"[BROADCAST] No local rewards bucket for epoch={publish_epoch} yet "
+                                f"(startup/restart). Publishing empty rewards snapshot."
+                            )
                         uid_points = {}
                         for hk, pts in hotkey_points.items():
                             if hk in self._validator.metagraph.hotkeys:
@@ -128,7 +138,14 @@ class ValidationClient:
                                 uid_points[uid] = int(pts)
                         
                         # Also get penalties for broadcasting.
-                        hotkey_penalties = self._validator._miner_penalty.get_penalties(epoch=publish_epoch)
+                        try:
+                            hotkey_penalties = self._validator._miner_penalty.get_penalties(epoch=publish_epoch)
+                        except KeyError:
+                            hotkey_penalties = {}
+                            bt.logging.info(
+                                f"[BROADCAST] No local penalties bucket for epoch={publish_epoch} yet "
+                                f"(startup/restart). Publishing empty penalties snapshot."
+                            )
                         uid_penalties = {}
                         for hk, cnt in hotkey_penalties.items():
                             if hk in self._validator.metagraph.hotkeys:
@@ -146,6 +163,10 @@ class ValidationClient:
                             uid_penalties=uid_penalties,
                             sender_hotkey=str(self._validator.wallet.hotkey.ss58_address),
                             seq=int(publish_epoch),
+                        )
+                        bt.logging.info(
+                            f"[BROADCAST] Preparing publish epoch={publish_epoch} "
+                            f"uid_points={len(uid_points)} uid_penalties={len(uid_penalties)}"
                         )
                         # Fan out to whitelisted validator hotkeys (permit + stake threshold),
                         # bounded by VALIDATOR_BROADCAST_MAX_TARGETS.
@@ -173,6 +194,10 @@ class ValidationClient:
                         if max_targets > 0 and len(axons) > max_targets:
                             axons = random.sample(axons, max_targets)
                         if axons:
+                            bt.logging.info(
+                                f"[BROADCAST] Publishing epoch={publish_epoch} to {len(axons)} validator axon(s) "
+                                f"(whitelist={len(whitelist)}, max_targets={max_targets})"
+                            )
                             # Broadcast both rewards and penalties.
                             await self._validator.dendrite.forward(
                                 axons=axons,
@@ -187,6 +212,13 @@ class ValidationClient:
                                     timeout=12.0,
                                     deserialize=True,
                                 )
+                        else:
+                            bt.logging.info(
+                                f"[BROADCAST] Skipping publish epoch={publish_epoch}: "
+                                f"no target validator axons (whitelist={len(whitelist)})"
+                            )
+                        # Mark this epoch as attempted so we don't retry every poll loop.
+                        self._last_publish_epoch = int(publish_epoch)
                 except Exception as e:
                     bt.logging.debug(f"[BROADCAST] Publish failed: {e}")
 
