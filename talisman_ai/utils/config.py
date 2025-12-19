@@ -180,6 +180,22 @@ def add_validator_args(cls, parser):
         default="validator",
     )
 
+    # Keep parity with miner config: ensure `config.blacklist.*` always exists for validators too.
+    # (Base validator template code expects these fields.)
+    # Not 100% sure we need this but it was throwing some NoneType errors.
+    parser.add_argument(
+        "--blacklist.force_validator_permit",
+        action="store_true",
+        help="If set, we will force incoming requests to have a permit.",
+        default=False,
+    )
+    parser.add_argument(
+        "--blacklist.allow_non_registered",
+        action="store_true",
+        help="If set, validators will accept messages from non registered entities. (Dangerous!)",
+        default=False,
+    )
+
     parser.add_argument(
         "--neuron.timeout",
         type=float,

@@ -331,6 +331,19 @@ class BaseValidatorNeuron(BaseNeuron):
         # Check that validator is registered on the network.
         self.sync()
 
+        # Start the validator's axon server so miners can send back TweetBatch responses.
+        # `serve_axon()` registers/attaches handlers, but we still need to listen.
+        if not self.config.neuron.axon_off and getattr(self, "axon", None) is not None:
+            bt.logging.info(
+                f"Serving validator axon {self.axon} on network: {self.config.subtensor.chain_endpoint} "
+                f"with netuid: {self.config.netuid}"
+            )
+            try:
+                self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+                self.axon.start()
+            except Exception as e:
+                bt.logging.error(f"Failed to start validator axon: {e}")
+
         bt.logging.info(f"Validator starting at block: {self.block}")
 
         # This loop maintains the validator's operations until intentionally stopped.

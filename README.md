@@ -171,7 +171,6 @@ Copy `.vali_env_tmpl` to `.vali_env` and configure the following variables:
 | `VALIDATION_POLL_SECONDS` | Seconds between poll attempts (default: `10`) |
 | `MINER_BATCH_SIZE` | Tweets per miner batch (default: `3`) |
 | `TWEET_MAX_PROCESS_TIME` | Local processing timeout in seconds before requeue (default: `300.0`) |
-| `LOCAL_MINER_UID` | Optional: force the validator to query one miner uid (local testing) |
 | `VALIDATOR_BROADCAST_MAX_TARGETS` | Max validators to broadcast epoch snapshots to (default: `32`) |
 
 ---

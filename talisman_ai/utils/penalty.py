@@ -108,6 +108,10 @@ class MinerPenalty:
         # Write to file
         with open(file_path, 'w') as f:
             json.dump(data, f, indent=2)
+
+    # Backward compatibility: some callers use `.save()`.
+    def save(self, file_path: Optional[str] = None):
+        return self.save_to_file(file_path=file_path)
     
     def load_from_file(self, block: Callable[[], int], file_path: Optional[str] = None):
         """

@@ -50,6 +50,8 @@ class ValidationClient:
         self._validator = validator
         # Avoid spamming broadcasts: publish at most once per chain epoch.
         self._last_publish_epoch: Optional[int] = None
+        # Avoid spamming API submissions: submit at most once per target epoch.
+        self._last_api_submit_epoch: Optional[int] = None
         # Loop cadence. Keep defaults aligned with config.
         self.poll_seconds = poll_seconds if poll_seconds is not None else config.VALIDATION_POLL_SECONDS
         self.scores_block_interval = scores_block_interval if scores_block_interval is not None else config.SCORES_BLOCK_INTERVAL
@@ -254,6 +256,7 @@ class ValidationClient:
 
                 # Penalized UIDs: local and broadcast
                 penalized_uids: set = set()
+                local_penalties: Dict[str, int] = {}
                 try:
                     local_penalties = self._validator._miner_penalty.get_penalties(epoch=target_epoch)
                     bt.logging.debug(f"[ValidationClient.run] Retrieved local_penalties: {local_penalties}")
@@ -304,8 +307,35 @@ class ValidationClient:
                 
                 # submit rewards and penalties to the API
                 try:
-                    await self.api_client.submit_rewards(rewards=rewards)
-                    await self.api_client.submit_penalties(penalties=local_penalties)
+                    if target_epoch >= 0 and self._last_api_submit_epoch != int(target_epoch):
+                        # Rewards: API expects {start_block, stop_block, hotkey, points}
+                        start_block = int(target_epoch) * int(config.BLOCK_LENGTH)
+                        stop_block = (int(target_epoch) + 1) * int(config.BLOCK_LENGTH) - 1
+                        rewards_payload = [
+                            {
+                                "start_block": start_block,
+                                "stop_block": stop_block,
+                                "hotkey": r.hotkey,
+                                "points": float(getattr(r, "reward", 0)),
+                            }
+                            for r in rewards
+                        ]
+
+                        # Penalties: API expects {hotkey, reason}
+                        penalties_payload = [
+                            {
+                                "hotkey": hk,
+                                "reason": f"epoch={int(target_epoch)} count={int(cnt)}",
+                            }
+                            for hk, cnt in (local_penalties or {}).items()
+                            if int(cnt) > 0
+                        ]
+
+                        if rewards_payload:
+                            await self.api_client.submit_rewards(rewards=rewards_payload)
+                        if penalties_payload:
+                            await self.api_client.submit_penalties(penalties=penalties_payload)
+                        self._last_api_submit_epoch = int(target_epoch)
                 except Exception as e:
                     bt.logging.warning(f"[ValidationClient.run] Failed to submit rewards and penalties: {e}")
                 

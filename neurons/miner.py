@@ -29,9 +29,8 @@ class Miner(BaseMinerNeuron):
         bt.logging.info("[Miner] Initializing analyzer...")
         self.analyzer = setup_analyzer()
         bt.logging.info("[Miner] Analyzer initialized")
-        
-        # Initialize dendrite for sending responses back to validators
-        self.dendrite = bt.Dendrite(wallet=self.wallet)
+        # NOTE: we intentionally do NOT reuse a single bt.Dendrite across threads/event-loops.
+        # Miner responses are sent back to validators from a background thread with its own event loop.
 
         # IMPORTANT: Register a concrete TweetBatch handler on the axon.
         # Bittensor routes requests by synapse class name; attaching only `forward(self, bt.Synapse)`
@@ -162,18 +161,39 @@ class Miner(BaseMinerNeuron):
             # Send the processed batch back to the validator
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            dendrite = None
             try:
-                response = loop.run_until_complete(
-                    self.dendrite.forward(
+                dendrite = bt.Dendrite(wallet=self.wallet)
+                responses = loop.run_until_complete(
+                    dendrite.forward(
                         axons=[validator_axon],
                         synapse=synapse,
                         timeout=30.0,
+                        deserialize=True,
                     )
                 )
-                bt.logging.info(f"[Miner] Background: Successfully sent processed TweetBatch back to validator {validator_hotkey}")
+                try:
+                    status_code = responses[0].dendrite.status_code if responses and responses[0].dendrite else None
+                    status_msg = responses[0].dendrite.status_message if responses and responses[0].dendrite else None
+                except Exception:
+                    status_code, status_msg = None, None
+                if status_code != 200:
+                    bt.logging.error(f"[Miner] Background: Validator response failed (status={status_code}): {status_msg}")
+                else:
+                    bt.logging.info(
+                        f"[Miner] Background: Successfully sent processed TweetBatch back to validator {validator_hotkey}"
+                    )
             except Exception as e:
                 bt.logging.error(f"[Miner] Background: Failed to send response to validator: {e}")
             finally:
+                try:
+                    if dendrite is not None:
+                        if hasattr(dendrite, "aclose_session"):
+                            loop.run_until_complete(dendrite.aclose_session())
+                        elif hasattr(dendrite, "close_session"):
+                            dendrite.close_session()
+                except Exception:
+                    pass
                 loop.close()
                 
         except Exception as e:
@@ -345,3 +365,4 @@ if __name__ == "__main__":
         while True:
             bt.logging.info(f"Miner running... {time.time()}")
             time.sleep(5)
+
