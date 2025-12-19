@@ -26,6 +26,7 @@ def tao_price() -> float:
     """
     Fetch TAO/USD price from the coordination API (cached by TaoStats).
     Returns cached value if API is unavailable.
+    On cold start (no cache), retries up to 3 times with backoff.
     """
     now = time.time()
     
@@ -42,24 +43,38 @@ def tao_price() -> float:
             return _tao_price_cache["price"]
         raise RuntimeError("MINER_API_URL not configured and no cached price available")
     
-    try:
-        response = requests.get(
-            f"{api_url.rstrip('/')}/price/tao-usd",
-            timeout=5.0,
-        )
-        response.raise_for_status()
-        data = response.json()
-        price = float(data["price_usd"])
-        _tao_price_cache["price"] = price
-        _tao_price_cache["timestamp"] = now
-        logger.debug(f"TAO price from API: ${price:.2f}")
-        return price
-    except Exception as e:
-        logger.warning(f"Failed to fetch TAO price from API: {e}")
-        if _tao_price_cache["price"] is not None:
-            logger.warning(f"Using stale TAO price: ${_tao_price_cache['price']:.2f}")
-            return _tao_price_cache["price"]
-        raise
+    # Determine retry behavior: more retries on cold start
+    is_cold_start = _tao_price_cache["price"] is None
+    max_attempts = 3 if is_cold_start else 1
+    retry_delays = [2, 5, 10]
+    
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            response = requests.get(
+                f"{api_url.rstrip('/')}/price/tao-usd",
+                timeout=5.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            price = float(data["price_usd"])
+            _tao_price_cache["price"] = price
+            _tao_price_cache["timestamp"] = time.time()
+            logger.debug(f"TAO price from API: ${price:.2f}")
+            return price
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts - 1:
+                delay = retry_delays[attempt]
+                logger.warning(f"Failed to fetch TAO price (attempt {attempt + 1}/{max_attempts}): {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+    
+    # All attempts failed
+    logger.warning(f"Failed to fetch TAO price from API: {last_error}")
+    if _tao_price_cache["price"] is not None:
+        logger.warning(f"Using stale TAO price: ${_tao_price_cache['price']:.2f}")
+        return _tao_price_cache["price"]
+    raise RuntimeError(f"Failed to fetch TAO price after {max_attempts} attempts: {last_error}")
 
 def get_alpha_per_point():
     sub = Subtensor()
