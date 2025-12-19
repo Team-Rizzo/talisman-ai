@@ -47,6 +47,7 @@ from talisman_ai.utils.api_models import (
     TweetsForScoringResponse,
     CompletedTweetSubmission,
     SubmissionResponse,
+    TaoPriceResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -530,6 +531,20 @@ class TalismanAPIClient:
         data = await self._request("DELETE", f"/blacklist/{hotkey}")
         
         return SubmissionResponse(**data)
+    
+    # =========================================================================
+    # Price Methods
+    # =========================================================================
+    
+    async def get_tao_price(self) -> TaoPriceResponse:
+        """
+        Get the cached TAO/USD price.
+        
+        Returns:
+            TaoPriceResponse with price_usd, last_updated, source, and stale flag
+        """
+        data = await self._request("GET", "/price/tao-usd")
+        return TaoPriceResponse(**data)
 
 
 # =============================================================================
@@ -648,6 +663,10 @@ class TalismanAPIClientSync:
     def remove_blacklisted_hotkey(self, hotkey: str) -> SubmissionResponse:
         """Remove a hotkey from the blacklist."""
         return self._run(self._async_client.remove_blacklisted_hotkey(hotkey))
+    
+    def get_tao_price(self) -> TaoPriceResponse:
+        """Get the cached TAO/USD price."""
+        return self._run(self._async_client.get_tao_price())
 
 
 # =============================================================================

@@ -55,6 +55,9 @@ class ValidationClient:
         # Loop cadence. Keep defaults aligned with config.
         self.poll_seconds = poll_seconds if poll_seconds is not None else config.VALIDATION_POLL_SECONDS
         self.scores_block_interval = scores_block_interval if scores_block_interval is not None else config.SCORES_BLOCK_INTERVAL
+        # Exponential backoff state for API errors
+        self._consecutive_errors = 0
+        self._max_backoff_seconds = 300  # Max 5 minutes between retries
 
     async def run(
         self,
@@ -83,8 +86,17 @@ class ValidationClient:
                             self._validator._miner_penalty.add_penalty(tweet.hotkey, 1)
                     bt.logging.debug("[ValidationClient.run] Fetching unscored tweets from api and local store")
                     unscored_tweets = (await self.api_client.get_unscored_tweets(limit=config.MINER_BATCH_SIZE)) + [tweet.tweet for tweet in self._validator._tweet_store.get_unprocessed_tweets()]
+                    # Reset error counter on success
+                    self._consecutive_errors = 0
                 except Exception as e:
-                    bt.logging.warning(f"[ValidationClient.run] Failed to fetch unscored tweets: {e}")
+                    self._consecutive_errors += 1
+                    # Exponential backoff: 2^errors seconds, capped at max_backoff
+                    backoff = min(2 ** self._consecutive_errors, self._max_backoff_seconds)
+                    bt.logging.warning(
+                        f"[ValidationClient.run] Failed to fetch unscored tweets: {e} "
+                        f"(attempt {self._consecutive_errors}, backing off {backoff}s)"
+                    )
+                    await asyncio.sleep(backoff)
                     continue
 
                 if unscored_tweets:

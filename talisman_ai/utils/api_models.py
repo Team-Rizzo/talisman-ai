@@ -347,3 +347,15 @@ class SubmissionResponse(BaseModel):
 class ErrorResponse(BaseModel):
     """Error response model."""
     detail: str
+
+
+# ============================================================================
+# TAO Price Models
+# ============================================================================
+
+class TaoPriceResponse(BaseModel):
+    """Response model for TAO/USD price endpoint."""
+    price_usd: float
+    last_updated: str
+    source: str
+    stale: bool

@@ -1,11 +1,15 @@
 import requests
 import time
+import logging
 from bittensor.core.subtensor import Subtensor
 from talisman_ai import config
 from substrateinterface import SubstrateInterface
-from typing import Any
+from typing import Any, Optional
 import numpy as np
 from talisman_ai.models.reward import Reward
+
+logger = logging.getLogger(__name__)
+
 NETUID = 45
 CACHE_TTL_SECONDS = 300  # 5 minutes
 _storage_cache: dict[tuple, tuple[Any, float]] = {}  # {cache_key: (value, timestamp)}
@@ -13,10 +17,49 @@ BLOCKS_PER_DAY = 7200
 ALPHA_DECIMALS = 9
 ALPHA_UNIT = 10 ** ALPHA_DECIMALS
 
-def tao_price():
-    response = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd")
-    data = response.json()
-    return data["bittensor"]["usd"]
+# Local TAO price cache (for fallback)
+_tao_price_cache: dict[str, Any] = {"price": None, "timestamp": 0.0}
+TAO_PRICE_CACHE_TTL = 300  # 5 minutes local cache
+
+
+def tao_price() -> float:
+    """
+    Fetch TAO/USD price from the coordination API (cached by TaoStats).
+    Returns cached value if API is unavailable.
+    """
+    now = time.time()
+    
+    # Return cached value if fresh
+    if _tao_price_cache["price"] is not None:
+        if now - _tao_price_cache["timestamp"] < TAO_PRICE_CACHE_TTL:
+            return _tao_price_cache["price"]
+    
+    # Fetch from coordination API
+    api_url = config.MINER_API_URL
+    if not api_url or api_url == "null":
+        if _tao_price_cache["price"] is not None:
+            logger.warning("MINER_API_URL not configured, using stale TAO price")
+            return _tao_price_cache["price"]
+        raise RuntimeError("MINER_API_URL not configured and no cached price available")
+    
+    try:
+        response = requests.get(
+            f"{api_url.rstrip('/')}/price/tao-usd",
+            timeout=5.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+        price = float(data["price_usd"])
+        _tao_price_cache["price"] = price
+        _tao_price_cache["timestamp"] = now
+        logger.debug(f"TAO price from API: ${price:.2f}")
+        return price
+    except Exception as e:
+        logger.warning(f"Failed to fetch TAO price from API: {e}")
+        if _tao_price_cache["price"] is not None:
+            logger.warning(f"Using stale TAO price: ${_tao_price_cache['price']:.2f}")
+            return _tao_price_cache["price"]
+        raise
 
 def get_alpha_per_point():
     sub = Subtensor()
