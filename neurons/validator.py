@@ -71,10 +71,8 @@ class Validator(BaseValidatorNeuron):
         self._miner_reward.load_from_file(block=lambda: int(self.block))
         self._miner_penalty.load_from_file(block=lambda: int(self.block))
 
-        # Push-based mining:
-        # - Validator dispatches TweetBatch to miners (fire-and-forget).
-        # - Miners push enriched TweetBatch back to this validator's axon when ready.
-        # So: never validate the immediate dispatch response; validate only in forward_tweets().
+        # Validator dispatches TweetBatch to miners (fire-and-forget).
+        # Miners push analyzed TweetBatch back to this validator's axon when ready.
         self._miner_dispatch_semaphore = asyncio.Semaphore(
             max(1, int(getattr(config, "VALIDATOR_MINER_QUERY_CONCURRENCY", 8)))
         )
@@ -180,9 +178,9 @@ class Validator(BaseValidatorNeuron):
                     pass
             return False
 
-        # Batch accepted: persist enriched tweets, mark processed, and reward once per tweet.
+        # Batch accepted: persist analyzed tweets, mark processed, and reward once per tweet.
         for tweet in tweet_batch:
-            # Ensure store has the enriched tweet for API submission.
+            # Ensure store has the analyzed tweet for API submission.
             try:
                 self._tweet_store.update_tweet(tweet.id, tweet)
             except Exception:
@@ -273,8 +271,6 @@ class Validator(BaseValidatorNeuron):
             responses = await self.dendrite.forward(
                 axons=[axon],
                 synapse=tweet_batch,
-                # Push-based mining: we only need to confirm the dispatch reached the miner.
-                # The miner will push the enriched TweetBatch back asynchronously.
                 timeout=float(getattr(config, "MINER_SEND_TIMEOUT", 6.0)),
                 deserialize=True
             )
@@ -288,7 +284,6 @@ class Validator(BaseValidatorNeuron):
                         pass
                 return None
 
-            # IMPORTANT: Do NOT validate `responses[0].tweet_batch` here.
             # Miners are expected to ack immediately and push results back to our axon later.
             return responses[0]
         except Exception as e:
