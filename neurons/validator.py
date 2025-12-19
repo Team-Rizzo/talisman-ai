@@ -8,7 +8,7 @@ Validator entrypoint.
 
 import asyncio
 import time
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import bittensor as bt
 from talisman_ai.base.validator import BaseValidatorNeuron
@@ -70,19 +70,71 @@ class Validator(BaseValidatorNeuron):
         # Persisted stores expect a callable `block()`; pass a lambda (self.block is an int).
         self._miner_reward.load_from_file(block=lambda: int(self.block))
         self._miner_penalty.load_from_file(block=lambda: int(self.block))
+
+        # Push-based mining:
+        # - Validator dispatches TweetBatch to miners (fire-and-forget).
+        # - Miners push enriched TweetBatch back to this validator's axon when ready.
+        # So: never validate the immediate dispatch response; validate only in forward_tweets().
+        self._miner_dispatch_semaphore = asyncio.Semaphore(
+            max(1, int(getattr(config, "VALIDATOR_MINER_QUERY_CONCURRENCY", 8)))
+        )
+        self._pending_miner_tasks: Set[asyncio.Task] = set()
+        self._max_pending_miner_tasks: int = int(
+            getattr(config, "VALIDATOR_MAX_PENDING_MINER_TASKS", 256)
+        )
         
     async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
         """
         The synapse is a TweetBatch from the miner
         """
-        # Note: in the normal workflow we query miners via dendrite and handle the response in
-        # `_process_miner_batch()`. This axon handler is retained for compatibility/testing.
-        # Since we didn't initiate this request, we pass tweet_batch as sent_batch (no size check).
+        # Push-based mining: this *is* where we validate miner results.
         miner_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
         if not miner_hotkey:
             return synapse
-        await self._handle_miner_batch_response(synapse.tweet_batch, miner_hotkey, synapse.tweet_batch)
+
+        # Build the original batch from the local store to prevent cherry-picking and
+        # to avoid penalizing miners for the initial "ack" response (which has no analysis).
+        sent_batch: List[TweetWithAuthor] = []
+        for returned in synapse.tweet_batch:
+            tid = str(getattr(returned, "id", ""))
+            if not tid:
+                continue
+            try:
+                # Only accept results for tweets we currently consider "processing" for that miner.
+                # If we can't match (e.g. validator restarted, timeout already requeued), ignore quietly.
+                if self._tweet_store.get_status(tid).value != "Processing":
+                    return synapse
+                if self._tweet_store.get_hotkey(tid) != miner_hotkey:
+                    return synapse
+                sent_batch.append(self._tweet_store.get_tweet(tid))
+            except Exception:
+                return synapse
+
+        if not sent_batch:
+            return synapse
+
+        await self._handle_miner_batch_response(synapse.tweet_batch, miner_hotkey, sent_batch)
         return synapse
+
+    def _track_task(self, task: asyncio.Task) -> None:
+        self._pending_miner_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._pending_miner_tasks.discard(t)
+            try:
+                exc = t.exception()
+                if exc is not None:
+                    bt.logging.debug(f"[VALIDATION] Miner dispatch task failed: {exc}")
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        task.add_done_callback(_done)
+
+    async def _dispatch_miner_batch(self, miner_batch: List[TweetWithAuthor], uid: int) -> None:
+        async with self._miner_dispatch_semaphore:
+            await self._process_miner_batch(miner_batch, uid)
 
     async def _handle_miner_batch_response(
         self,
@@ -174,7 +226,14 @@ class Validator(BaseValidatorNeuron):
         uids = list(get_random_uids(self, k=len(miner_batches), exclude=[int(self.uid)]))
 
         for miner_batch, uid in zip(miner_batches, uids):
-            await self._process_miner_batch(miner_batch, uid)
+            if len(self._pending_miner_tasks) >= self._max_pending_miner_tasks:
+                bt.logging.warning(
+                    f"[VALIDATION] Too many pending miner dispatch tasks ({len(self._pending_miner_tasks)}); "
+                    f"skipping scheduling remaining batches this tick."
+                )
+                break
+            task = asyncio.create_task(self._dispatch_miner_batch(miner_batch, int(uid)))
+            self._track_task(task)
             
     async def _process_miner_batch( 
         self, 
@@ -189,7 +248,7 @@ class Validator(BaseValidatorNeuron):
             uid: Miner uid to query
         
         Returns:
-            Miner response synapse, or None on failure
+            Dispatch result synapse (ack), or None on failure.
         """
         try:
             miner_hotkey = None
@@ -214,8 +273,9 @@ class Validator(BaseValidatorNeuron):
             responses = await self.dendrite.forward(
                 axons=[axon],
                 synapse=tweet_batch,
-                # Miner batches require LLM calls per tweet; 12s is often too short.
-                timeout=60.0,
+                # Push-based mining: we only need to confirm the dispatch reached the miner.
+                # The miner will push the enriched TweetBatch back asynchronously.
+                timeout=float(getattr(config, "MINER_SEND_TIMEOUT", 6.0)),
                 deserialize=True
             )
             if not responses[0].dendrite.status_code == 200:
@@ -228,21 +288,9 @@ class Validator(BaseValidatorNeuron):
                         pass
                 return None
 
-            response_syn = responses[0]
-            # Apply validation + reward/penalty based on miner response.
-            if miner_hotkey is None and response_syn.dendrite and response_syn.dendrite.hotkey:
-                miner_hotkey = response_syn.dendrite.hotkey
-            if miner_hotkey is None:
-                # Can't attribute; requeue.
-                for tweet in miner_batch:
-                    try:
-                        self._tweet_store.reset_to_unprocessed(tweet.id)
-                    except Exception:
-                        pass
-                return None
-
-            await self._handle_miner_batch_response(response_syn.tweet_batch, miner_hotkey, miner_batch)
-            return response_syn
+            # IMPORTANT: Do NOT validate `responses[0].tweet_batch` here.
+            # Miners are expected to ack immediately and push results back to our axon later.
+            return responses[0]
         except Exception as e:
             bt.logging.error(f"[VALIDATION] Failed to process miner batch: {e}", exc_info=True)
             for tweet in miner_batch:

@@ -90,6 +90,12 @@ MINER_BATCH_SIZE = int(os.getenv("MINER_BATCH_SIZE", "3"))
 BLOCK_LENGTH = int(os.getenv("BLOCK_LENGTH", "100"))
 START_BLOCK = int(os.getenv("START_BLOCK", "0"))
 
+# Validator -> miner dispatch behavior (push-based mining).
+# The validator should only "dispatch" work; miners will push results back asynchronously.
+MINER_SEND_TIMEOUT = float(os.getenv("MINER_SEND_TIMEOUT", "6.0"))
+VALIDATOR_MINER_QUERY_CONCURRENCY = int(os.getenv("VALIDATOR_MINER_QUERY_CONCURRENCY", "8"))
+VALIDATOR_MAX_PENDING_MINER_TASKS = int(os.getenv("VALIDATOR_MAX_PENDING_MINER_TASKS", "256"))
+
 # Tweet store configuration
 TWEET_STORE_LOCATION = os.getenv("TWEET_STORE_LOCATION", str(_SUBNET_ROOT / ".tweet_store.json"))
 TWEET_MAX_PROCESS_TIME = float(os.getenv("TWEET_MAX_PROCESS_TIME", "300.0"))  # 5 minutes default
