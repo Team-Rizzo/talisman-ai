@@ -90,6 +90,8 @@ class Validator(BaseValidatorNeuron):
         if not miner_hotkey:
             return synapse
 
+        bt.logging.info(f"[VALIDATION] Received TweetBatch with {len(synapse.tweet_batch)} tweet(s) from miner {miner_hotkey[:12]}..")
+
         # Build the original batch from the local store to prevent cherry-picking and
         # to avoid penalizing miners for the initial "ack" response (which has no analysis).
         sent_batch: List[TweetWithAuthor] = []
@@ -170,6 +172,7 @@ class Validator(BaseValidatorNeuron):
             validate_miner_batch, tweet_batch, self._analyzer, 1
         )
         if not is_valid:
+            bt.logging.warning(f"[VALIDATION] Batch validation FAILED for miner {miner_hotkey[:12]}..")
             self._miner_penalty.add_penalty(miner_hotkey, 1)
             for tweet in tweet_batch:
                 try:
@@ -178,6 +181,7 @@ class Validator(BaseValidatorNeuron):
                     pass
             return False
 
+        bt.logging.info(f"[VALIDATION] Batch validation PASSED for miner {miner_hotkey[:12]}..")
         # Batch accepted: persist analyzed tweets, mark processed, and reward once per tweet.
         for tweet in tweet_batch:
             # Ensure store has the analyzed tweet for API submission.
