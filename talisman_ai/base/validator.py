@@ -359,7 +359,11 @@ class BaseValidatorNeuron(BaseNeuron):
                     break
 
                 # Sync metagraph and potentially set weights.
-                self.sync()
+                try:
+                    self.sync()
+                except Exception as sync_err:
+                    # Handle websocket concurrency errors gracefully
+                    bt.logging.warning(f"Sync failed (will retry next step): {type(sync_err).__name__}: {sync_err}")
 
                 self.step += 1
 

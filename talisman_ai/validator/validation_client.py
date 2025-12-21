@@ -72,8 +72,8 @@ class ValidationClient:
         self._running = True
         bt.logging.info("[ValidationClient.run] Entering main validation loop (poll_interval=%ss, scores_interval=%s blocks)", self.poll_seconds, self.scores_block_interval)
 
-        try:
-            while self._running:
+        while self._running:
+            try:
                 bt.logging.debug("[ValidationClient.run] Top of poll loop")
                 try:
                     bt.logging.debug("[ValidationClient.run] Checking for timed-out tweets")
@@ -352,5 +352,10 @@ class ValidationClient:
                     bt.logging.warning(f"[ValidationClient.run] Failed to submit rewards and penalties: {e}")
                 
                 await asyncio.sleep(float(self.poll_seconds))
-        except Exception as e:
-            bt.logging.error(f"[ValidationClient.run] Failed to run validation client: {e}", exc_info=True)
+            except asyncio.CancelledError:
+                bt.logging.info("[ValidationClient.run] Validation client cancelled")
+                raise  # Re-raise to properly stop the task
+            except Exception as e:
+                bt.logging.warning(f"[ValidationClient.run] Loop iteration error (will retry): {type(e).__name__}: {e}")
+                await asyncio.sleep(5.0)  # Brief pause before retry
+                continue
