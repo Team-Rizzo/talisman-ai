@@ -72,8 +72,8 @@ class ValidationClient:
         self._running = True
         bt.logging.info("[ValidationClient.run] Entering main validation loop (poll_interval=%ss, scores_interval=%s blocks)", self.poll_seconds, self.scores_block_interval)
 
-        try:
-            while self._running:
+        while self._running:
+            try:
                 bt.logging.debug("[ValidationClient.run] Top of poll loop")
                 try:
                     bt.logging.debug("[ValidationClient.run] Checking for timed-out tweets")
@@ -266,27 +266,40 @@ class ValidationClient:
 
                 bt.logging.info(f"[REWARDS] Broadcasted rewards: {broadcast_uid_rewards}")
 
-                # Penalized UIDs: local and broadcast
+                # Penalized UIDs: only if 2+ validators (including local) penalized
                 penalized_uids: set = set()
                 local_penalties: Dict[str, int] = {}
+                # Track validator counts per UID (local + broadcast)
+                uid_validator_counts: Dict[int, int] = {}
+                
                 try:
                     local_penalties = self._validator._miner_penalty.get_penalties(epoch=target_epoch)
                     bt.logging.debug(f"[ValidationClient.run] Retrieved local_penalties: {local_penalties}")
+                    # Count local validator penalties (counts as 1 validator per UID)
                     for hk, cnt in local_penalties.items():
                         if cnt > 0 and hk in self._validator.metagraph.hotkeys:
                             uid = self._validator.metagraph.hotkeys.index(hk)
-                            penalized_uids.add(uid)
+                            uid_validator_counts[uid] = uid_validator_counts.get(uid, 0) + 1
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] [PENALTIES] Failed to get local penalties: {e}")
 
                 # bt.logging.info(f"[PENALTIES] Local penalties: {local_penalties}")
 
                 try:
-                    broadcast_penalized = self._validator._penalty_broadcasts.get_penalized_uids(target_epoch)
-                    bt.logging.debug(f"[ValidationClient.run] Aggregated broadcast_penalized: {broadcast_penalized}")
-                    penalized_uids.update(broadcast_penalized)
+                    # Get count of unique validators that penalized each UID from broadcasts
+                    broadcast_validator_counts = self._validator._penalty_broadcasts.get_validator_penalty_counts(target_epoch)
+                    bt.logging.debug(f"[ValidationClient.run] Broadcast validator penalty counts: {broadcast_validator_counts}")
+                    # Add broadcast counts to total
+                    for uid, count in broadcast_validator_counts.items():
+                        uid_validator_counts[uid] = uid_validator_counts.get(uid, 0) + count
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] [PENALTY_BROADCAST] Failed to aggregate penalties: {e}")
+
+                # Only penalize if 2+ validators (local + broadcast) penalized
+                for uid, count in uid_validator_counts.items():
+                    if count >= 2:
+                        penalized_uids.add(uid)
+                        bt.logging.info(f"[PENALTIES] UID={uid} penalized by {count} validators (local + broadcast), will zero rewards")
 
                 # bt.logging.info(f"[PENALTY_BROADCAST] Broadcasted penalties: {broadcast_penalized}")
 
@@ -352,5 +365,10 @@ class ValidationClient:
                     bt.logging.warning(f"[ValidationClient.run] Failed to submit rewards and penalties: {e}")
                 
                 await asyncio.sleep(float(self.poll_seconds))
-        except Exception as e:
-            bt.logging.error(f"[ValidationClient.run] Failed to run validation client: {e}", exc_info=True)
+            except asyncio.CancelledError:
+                bt.logging.info("[ValidationClient.run] Validation client cancelled")
+                raise  # Re-raise to properly stop the task
+            except Exception as e:
+                bt.logging.warning(f"[ValidationClient.run] Loop iteration error (will retry): {type(e).__name__}: {e}")
+                await asyncio.sleep(5.0)  # Brief pause before retry
+                continue

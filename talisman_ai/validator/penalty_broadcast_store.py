@@ -127,3 +127,20 @@ class PenaltyBroadcastStore:
         agg = self.aggregate_epoch(epoch)
         return {uid for uid, cnt in agg.items() if cnt > 0}
 
+    def get_validator_penalty_counts(self, epoch: int) -> Dict[int, int]:
+        """
+        Get the count of unique validators that penalized each UID for a given epoch.
+        
+        Returns:
+            Dict[int, int]: Mapping of UID -> number of unique validators that penalized it.
+        """
+        epoch_i = int(epoch)
+        senders = self.by_epoch_by_sender.get(epoch_i) or {}
+        uid_validator_counts: Dict[int, int] = {}
+        for _sender, uid_penalties in senders.items():
+            for uid, cnt in uid_penalties.items():
+                if int(cnt) > 0:
+                    uid_i = int(uid)
+                    uid_validator_counts[uid_i] = uid_validator_counts.get(uid_i, 0) + 1
+        return uid_validator_counts
+
