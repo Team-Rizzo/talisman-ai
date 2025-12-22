@@ -333,7 +333,16 @@ class Validator(BaseValidatorNeuron):
         Starts the validation client on first invocation. The client runs independently
         in the background.
         """
-        if self._validation_task is None:
+        # Start or restart validation client if crashed
+        if self._validation_task is None or self._validation_task.done():
+            if self._validation_task is not None and self._validation_task.done():
+                # Log what killed it
+                try:
+                    exc = self._validation_task.exception()
+                    if exc:
+                        bt.logging.warning(f"[VALIDATION] Client crashed: {type(exc).__name__}: {exc}. Restarting...")
+                except asyncio.CancelledError:
+                    pass
             self._validation_task = asyncio.create_task(
                 self._validation_client.run(
                     on_tweets=self._on_tweets,
