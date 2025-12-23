@@ -266,31 +266,44 @@ class ValidationClient:
 
                 bt.logging.info(f"[REWARDS] Broadcasted rewards: {broadcast_uid_rewards}")
 
-                # Penalized UIDs: local and broadcast
+                # Penalized UIDs: only if 2+ validators (including local) penalized
                 penalized_uids: set = set()
                 local_penalties: Dict[str, int] = {}
+                # Track validator counts per UID (local + broadcast)
+                uid_validator_counts: Dict[int, int] = {}
+                
                 try:
                     local_penalties = self._validator._miner_penalty.get_penalties(epoch=target_epoch)
                     bt.logging.debug(f"[ValidationClient.run] Retrieved local_penalties: {local_penalties}")
+                    # Count local validator penalties (counts as 1 validator per UID)
                     for hk, cnt in local_penalties.items():
                         if cnt > 0 and hk in self._validator.metagraph.hotkeys:
                             uid = self._validator.metagraph.hotkeys.index(hk)
-                            penalized_uids.add(uid)
+                            uid_validator_counts[uid] = uid_validator_counts.get(uid, 0) + 1
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] [PENALTIES] Failed to get local penalties: {e}")
 
                 # bt.logging.info(f"[PENALTIES] Local penalties: {local_penalties}")
 
                 try:
-                    broadcast_penalized = self._validator._penalty_broadcasts.get_penalized_uids(target_epoch)
-                    bt.logging.debug(f"[ValidationClient.run] Aggregated broadcast_penalized: {broadcast_penalized}")
-                    penalized_uids.update(broadcast_penalized)
+                    # Get count of unique validators that penalized each UID from broadcasts
+                    broadcast_validator_counts = self._validator._penalty_broadcasts.get_validator_penalty_counts(target_epoch)
+                    bt.logging.debug(f"[ValidationClient.run] Broadcast validator penalty counts: {broadcast_validator_counts}")
+                    # Add broadcast counts to total
+                    for uid, count in broadcast_validator_counts.items():
+                        uid_validator_counts[uid] = uid_validator_counts.get(uid, 0) + count
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] [PENALTY_BROADCAST] Failed to aggregate penalties: {e}")
 
+                # Only penalize if 2+ validators (local + broadcast) penalized
+                for uid, count in uid_validator_counts.items():
+                    if count >= 2:
+                        penalized_uids.add(uid)
+                        bt.logging.info(f"[PENALTIES] UID={uid} penalized by {count} validators (local + broadcast), will zero rewards")
+
                 # bt.logging.info(f"[PENALTY_BROADCAST] Broadcasted penalties: {broadcast_penalized}")
 
-                # Build rewards list, zero for penalized
+                # Build rewards list, zero only if penalties >= rewards
                 rewards = []
                 bt.logging.debug(f"[ValidationClient.run] Building rewards list, penalized_uids: {penalized_uids}")
                 for uid, pts in combined_uid_rewards.items():
@@ -299,11 +312,14 @@ class ValidationClient:
                     except Exception:
                         bt.logging.debug(f"[ValidationClient.run] Could not resolve hotkey for UID={uid}, skipping.")
                         continue
-                    if uid in penalized_uids:
-                        bt.logging.info(f"[PENALTIES] Zeroing reward for penalized miner UID={uid} hotkey={hk[:12]}...")
-                        rewards.append(Reward(hotkey=hk, reward=0, epoch=target_epoch))
-                    else:
+                    penalty_count = uid_validator_counts.get(uid, 0)
+                    # Apply reward if reward_count > 0 AND reward_count > penalty_count
+                    if pts > 0 and pts > penalty_count:
+                        bt.logging.info(f"[REWARDS] Applying reward for UID={uid} hotkey={hk[:12]}... (rewards={pts} > penalties={penalty_count})")
                         rewards.append(Reward(hotkey=hk, reward=int(pts), epoch=target_epoch))
+                    else:
+                        bt.logging.info(f"[PENALTIES] Zeroing reward for UID={uid} hotkey={hk[:12]}... (rewards={pts} <= penalties={penalty_count})")
+                        rewards.append(Reward(hotkey=hk, reward=0, epoch=target_epoch))
                 bt.logging.debug(f"[ValidationClient.run] Calculating weights from rewards list (len={len(rewards)})")
                 weights = calculate_weights(rewards, self._validator.metagraph)
                 # bt.logging.info(f"[REWARDS] Weights: {weights}")
