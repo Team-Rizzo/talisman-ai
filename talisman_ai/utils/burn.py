@@ -1,6 +1,7 @@
 import requests
 import time
 import logging
+import bittensor as bt
 from bittensor.core.subtensor import Subtensor
 from talisman_ai import config
 from substrateinterface import SubstrateInterface
@@ -93,9 +94,10 @@ def get_storage_value(module: str, storage_fn: str, params=None) -> Any:
             return cached_value
     
     try:
-        substrate = SubstrateInterface(config.FINNEY_RPC)
-        result = substrate.query(module, storage_fn, params or [])
-        # substrateinterface returns an object with .value attribute or directly as an integer.
+        # Use bittensor's Subtensor which handles substrate connection properly
+        sub = Subtensor()
+        result = sub.substrate.query(module, storage_fn, params or [])
+        # bittensor returns BittensorScaleType with .value attribute
         if hasattr(result, 'value'):
             if isinstance(result.value, int):
                 value = result.value
@@ -117,7 +119,8 @@ def get_storage_value(module: str, storage_fn: str, params=None) -> Any:
         
         _storage_cache[cache_key] = (value, now)
         return value
-    except Exception:
+    except Exception as e:
+        bt.logging.warning(f"get_storage_value failed for {module}.{storage_fn}: {e}")
         return 0
 
 def get_pending_server_emission(netuid: int) -> int:
@@ -159,14 +162,30 @@ def calculate_weights(rewards: list[Reward], metagraph) -> np.ndarray:
     Calculates the weights for a given list of points and hotkeys.
     Returns: np.ndarray of shape (metagraph.n,)
     """
+    # Minimum percent per point to survive uint16 conversion (1/65535 ≈ 0.00153%, with 2x margin = 0.003%)
+    MIN_PERCENT_PER_POINT = 0.003
+    
     weights = np.zeros(metagraph.n if hasattr(metagraph, 'n') else len(metagraph), dtype=np.float64)
 
     percent_needed_for_each_hotkey = {}
     total_percent_needed = 0.0
     for reward in rewards:
-        percent_needed = get_percent_needed_to_equal_points(reward.reward)
+        try:
+            percent_needed = get_percent_needed_to_equal_points(reward.reward)
+        except Exception as e:
+            bt.logging.warning(f"[calculate_weights] Failed to get percent for reward={reward.reward}: {e}")
+            percent_needed = 0
+        
+        # Apply minimum floor: each point gets at least MIN_PERCENT_PER_POINT
+        min_percent_for_reward = reward.reward * MIN_PERCENT_PER_POINT
+        if percent_needed < min_percent_for_reward:
+            bt.logging.debug(f"[calculate_weights] Scaling up percent for {reward.reward} points: {percent_needed:.6f}% -> {min_percent_for_reward:.6f}%")
+            percent_needed = min_percent_for_reward
+        
         percent_needed_for_each_hotkey[reward.hotkey] = percent_needed
         total_percent_needed += percent_needed
+    
+    bt.logging.info(f"[calculate_weights] total_percent_needed={total_percent_needed:.4f}%, rewards_count={len(rewards)}")
 
     if total_percent_needed > 0:
         # If over 100%, scale all values down so the total sums to 100% or less
@@ -187,5 +206,9 @@ def calculate_weights(rewards: list[Reward], metagraph) -> np.ndarray:
                 weights[uid] = (percent / 100.0) if 100.0 != 0 else 0.0
 
     weights[config.BURN_UID] = (1 - (min(total_percent_needed, 100) / 100))
+    
+    # Log non-zero weights for debugging
+    non_zero = [(i, w) for i, w in enumerate(weights) if w > 0]
+    bt.logging.info(f"[calculate_weights] Non-zero weights: {non_zero[:10]}... (burn_uid={config.BURN_UID}, burn_weight={weights[config.BURN_UID]:.4f})")
 
     return weights
