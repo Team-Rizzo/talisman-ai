@@ -156,7 +156,7 @@ class Validator(BaseValidatorNeuron):
         # Miner must return exactly what was sent (no cherry-picking).
         if len(tweet_batch) != len(sent_batch):
             bt.logging.warning(
-                f"[VALIDATION] Batch size mismatch from miner {miner_hotkey[:12]}.. "
+                f"[VALIDATION] Batch size mismatch from miner {miner_hotkey} "
                 f"sent {len(sent_batch)}, got {len(tweet_batch)}"
             )
             self._miner_penalty.add_penalty(miner_hotkey, 1)
@@ -168,11 +168,37 @@ class Validator(BaseValidatorNeuron):
             return False
 
         # Validate by re-running analyzer on sampled posts.
-        is_valid, _result = await asyncio.to_thread(
+        is_valid, validation_result = await asyncio.to_thread(
             validate_miner_batch, tweet_batch, self._analyzer, 1
         )
         if not is_valid:
-            bt.logging.warning(f"[VALIDATION] Batch validation FAILED for miner {miner_hotkey[:12]}..")
+            # Log detailed rejection reason
+            discrepancies = validation_result.get("discrepancies", [])
+            match_rate = validation_result.get("match_rate", 0.0)
+            bt.logging.warning(
+                f"[VALIDATION] Batch validation FAILED for miner {miner_hotkey} "
+                f"match_rate={match_rate:.1%}, discrepancies={len(discrepancies)}"
+            )
+            for disc in discrepancies:
+                reason = disc.get("reason", "unknown")
+                preview = disc.get("post_preview", "")
+                if reason == "classification_mismatch":
+                    field_results = disc.get("field_results", {})
+                    failed_fields = [k for k, v in field_results.items() if not v]
+                    miner_vals = disc.get("miner", {})
+                    validator_vals = disc.get("validator", {})
+                    # Log each failed field with miner vs validator values
+                    field_comparisons = []
+                    for f in failed_fields:
+                        m = miner_vals.get(f, "?")
+                        v = validator_vals.get(f, "?")
+                        field_comparisons.append(f"{f}(m={m}|v={v})")
+                    bt.logging.warning(
+                        f"[VALIDATION] Mismatch for {miner_hotkey}: {', '.join(field_comparisons)} | preview={preview[:100]}"
+                    )
+                else:
+                    bt.logging.warning(f"[VALIDATION] Rejection for {miner_hotkey}: reason={reason}, preview={preview[:100]}")
+            
             self._miner_penalty.add_penalty(miner_hotkey, 1)
             for tweet in tweet_batch:
                 try:
@@ -181,7 +207,7 @@ class Validator(BaseValidatorNeuron):
                     pass
             return False
 
-        bt.logging.info(f"[VALIDATION] Batch validation PASSED for miner {miner_hotkey[:12]}..")
+        bt.logging.info(f"[VALIDATION] Batch validation PASSED for miner {miner_hotkey}")
         # Batch accepted: persist analyzed tweets, mark processed, and reward once per tweet.
         for tweet in tweet_batch:
             # Ensure store has the analyzed tweet for API submission.

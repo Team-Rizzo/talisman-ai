@@ -156,6 +156,10 @@ def validate_miner_batch(
             })
             continue
         
+        # Helper to safely lowercase for case-insensitive comparison
+        def _lower(val):
+            return val.lower() if isinstance(val, str) else val
+        
         # Extract miner fields
         m_subnet = miner_analysis.subnet_id
         m_sent = miner_analysis.sentiment
@@ -172,13 +176,13 @@ def validate_miner_batch(
         v_market = validator_result.market_analysis.value if validator_result.market_analysis else None
         v_impact = validator_result.impact_potential.value if validator_result.impact_potential else None
         
-        # Check matches (all exact)
+        # Check matches (case-insensitive for string fields)
         subnet_ok = m_subnet == v_subnet
-        sentiment_ok = m_sent == v_sent
-        content_ok = m_content == v_content
-        tech_ok = m_tech == v_tech
-        market_ok = m_market == v_market
-        impact_ok = m_impact == v_impact
+        sentiment_ok = _lower(m_sent) == _lower(v_sent)
+        content_ok = _lower(m_content) == _lower(v_content)
+        tech_ok = _lower(m_tech) == _lower(v_tech)
+        market_ok = _lower(m_market) == _lower(v_market)
+        impact_ok = _lower(m_impact) == _lower(v_impact)
         
         all_ok = subnet_ok and sentiment_ok and content_ok and tech_ok and market_ok and impact_ok
         
@@ -186,7 +190,27 @@ def validate_miner_batch(
             matches += 1
             bt.logging.debug(f"[Validator] Post {i+1}: MATCH")
         else:
-            bt.logging.warning(f"[Validator] Post {i+1}: MISMATCH")
+            # Build list of failed fields for detailed logging
+            failed_fields = []
+            if not subnet_ok:
+                failed_fields.append(f"subnet_id (miner={m_subnet} vs validator={v_subnet})")
+            if not sentiment_ok:
+                failed_fields.append(f"sentiment (miner={m_sent} vs validator={v_sent})")
+            if not content_ok:
+                failed_fields.append(f"content_type (miner={m_content} vs validator={v_content})")
+            if not tech_ok:
+                failed_fields.append(f"technical_quality (miner={m_tech} vs validator={v_tech})")
+            if not market_ok:
+                failed_fields.append(f"market_analysis (miner={m_market} vs validator={v_market})")
+            if not impact_ok:
+                failed_fields.append(f"impact_potential (miner={m_impact} vs validator={v_impact})")
+            
+            # Log detailed mismatch info
+            bt.logging.warning(f"[Validator] Post {i+1}: MISMATCH - Failed fields: {', '.join(failed_fields)}")
+            bt.logging.warning(f"[Validator] Post {i+1} text preview: {post_text[:200] if post_text else '(empty)'}")
+            bt.logging.warning(f"[Validator] Post {i+1} Miner classification: subnet_id={m_subnet}, sentiment={m_sent}, content_type={m_content}, tech={m_tech}, market={m_market}, impact={m_impact}")
+            bt.logging.warning(f"[Validator] Post {i+1} Validator classification: subnet_id={v_subnet}, sentiment={v_sent}, content_type={v_content}, tech={v_tech}, market={v_market}, impact={v_impact}")
+            
             discrepancies.append({
                 "post_index": i,
                 "reason": "classification_mismatch",
