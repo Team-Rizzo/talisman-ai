@@ -22,6 +22,23 @@ ALPHA_UNIT = 10 ** ALPHA_DECIMALS
 _tao_price_cache: dict[str, Any] = {"price": None, "timestamp": 0.0}
 TAO_PRICE_CACHE_TTL = 300  # 5 minutes local cache
 
+# Shared Subtensor instance to avoid repeated connections
+_subtensor_instance: Optional[Subtensor] = None
+
+def _get_subtensor() -> Subtensor:
+    """Get or create a shared Subtensor instance."""
+    global _subtensor_instance
+    if _subtensor_instance is None:
+        _subtensor_instance = Subtensor()
+        bt.logging.debug("[burn] Created shared Subtensor instance")
+    return _subtensor_instance
+
+def _reset_subtensor():
+    """Reset the shared Subtensor instance (e.g., on connection errors)."""
+    global _subtensor_instance
+    _subtensor_instance = None
+    bt.logging.debug("[burn] Reset shared Subtensor instance")
+
 
 def tao_price() -> float:
     """
@@ -78,10 +95,15 @@ def tao_price() -> float:
     raise RuntimeError(f"Failed to fetch TAO price after {max_attempts} attempts: {last_error}")
 
 def get_alpha_per_point():
-    sub = Subtensor()
-    price = sub.get_subnet_price(netuid=45)
-    alpha_price = price.tao*tao_price()
-    return alpha_price / config.USD_PRICE_PER_POINT 
+    try:
+        sub = _get_subtensor()
+        price = sub.get_subnet_price(netuid=45)
+        alpha_price = price.tao*tao_price()
+        return alpha_price / config.USD_PRICE_PER_POINT
+    except Exception as e:
+        bt.logging.warning(f"[get_alpha_per_point] Error: {e}, resetting subtensor")
+        _reset_subtensor()
+        raise 
 
 def get_storage_value(module: str, storage_fn: str, params=None) -> Any:
     cache_key = (module, storage_fn, tuple(params) if params else ())
@@ -94,8 +116,8 @@ def get_storage_value(module: str, storage_fn: str, params=None) -> Any:
             return cached_value
     
     try:
-        # Use bittensor's Subtensor which handles substrate connection properly
-        sub = Subtensor()
+        # Use shared Subtensor instance to avoid repeated connections
+        sub = _get_subtensor()
         result = sub.substrate.query(module, storage_fn, params or [])
         # bittensor returns BittensorScaleType with .value attribute
         if hasattr(result, 'value'):
@@ -121,6 +143,7 @@ def get_storage_value(module: str, storage_fn: str, params=None) -> Any:
         return value
     except Exception as e:
         bt.logging.warning(f"get_storage_value failed for {module}.{storage_fn}: {e}")
+        _reset_subtensor()  # Reset on error so next call creates fresh connection
         return 0
 
 def get_pending_server_emission(netuid: int) -> int:
