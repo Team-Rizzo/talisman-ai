@@ -41,15 +41,37 @@ def _clamp01(x: float) -> float:
 def _norm(value: float, cap: float) -> float:
     """
     Normalize a value to [0.0, 1.0] using linear scaling with a hard cap
-    
+
     Args:
         value: The raw value to normalize
         cap: The cap threshold - values at or above this threshold yield 1.0
-        
+
     Returns:
         Normalized value in [0.0, 1.0]
     """
     return _clamp01(value / cap)
+
+
+# Maximum age in days for a post to be considered for scoring
+MAX_POST_AGE_DAYS = 10
+
+
+def is_post_too_old(created_at) -> bool:
+    """
+    Check if a post is older than the maximum allowed age (10 days).
+
+    Args:
+        created_at: Post creation timestamp as string or datetime object
+
+    Returns:
+        True if post is older than MAX_POST_AGE_DAYS, False otherwise
+    """
+    if not created_at:
+        return True
+    post_date_str = created_at if isinstance(created_at, str) else created_at.isoformat()
+    dt = datetime.fromisoformat(post_date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+    age_days = (datetime.now(timezone.utc) - dt).total_seconds() / (3600.0 * 24.0)
+    return age_days > MAX_POST_AGE_DAYS
 
 
 def recency_score(post_date_iso: str, horizon_hours: float = 24.0) -> float:
@@ -247,36 +269,6 @@ def validate_miner_batch(
     return is_valid, result
 
 
-def _build_canonical_from_dict(classification: PostClassification) -> str:
-    """
-    Build canonical string from miner's classification dictionary
-    
-    This must match the exact format from PostClassification.to_canonical_string()
-    
-    Args:
-        classification: Dict with keys matching PostClassification fields
-        
-    Returns:
-        Canonical string for exact matching
-    """
-    # Extract fields
-    subnet_id = int(classification.subnet_id)
-    content_type = classification.content_type
-    sentiment = classification.sentiment
-    technical_quality = classification.technical_quality
-    market_analysis = classification.market_analysis
-    impact_potential = classification.impact_potential
-    relevance_confidence = classification.relevance_confidence
-    evidence_spans = classification.evidence_spans
-    anchors_detected = classification.anchors_detected
-    
-    # Sort evidence for determinism (same as PostClassification)
-    sorted_evidence = "|".join(sorted([s.lower() for s in evidence_spans]))
-    sorted_anchors = "|".join(sorted([s.lower() for s in anchors_detected]))
-    
-    return f"{subnet_id}|{content_type}|{sentiment}|{technical_quality}|{market_analysis}|{impact_potential}|{relevance_confidence}|{sorted_evidence}|{sorted_anchors}"
-
-
 # ===== Scoring Weights =====
 # Default weights for production scoring (used by score_post_entry)
 # These weights prioritize relevance over value, with recency as a minor factor
@@ -292,22 +284,17 @@ def compute_post_score(
 ) -> float:
     """
     Compute final post score combining classification + engagement + recency
-    
+
     Args:
         classification: PostClassification result
         post_info: TweetWithAuthor object
         weights: Optional custom weights dict
-        
+
     Returns:
         Final score in [0.0, 1.0]
     """
     # Check if post is older than 10 days - if so, return 0
-    if not post_info.created_at:
-        return 0.0
-    post_date_str = post_info.created_at if isinstance(post_info.created_at, str) else post_info.created_at.isoformat()
-    dt = datetime.fromisoformat(post_date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-    age_days = (datetime.now(timezone.utc) - dt).total_seconds() / (3600.0 * 24.0)
-    if age_days > 10:
+    if is_post_too_old(post_info.created_at):
         return 0.0
     
     if weights is None:
@@ -355,7 +342,12 @@ def get_tokens_from_analysis(analysis_result: PostClassification) -> Dict[str, f
     return classification.to_tokens_dict()
 
 
-def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_result: PostClassification = None) -> Tuple[float, List[Tuple[str, PostClassification]]]:
+def top_k_relevance_from_analyzer(
+    text: str,
+    analyzer: SubnetRelevanceAnalyzer,
+    k: int = 5,
+    analysis_result: PostClassification = None
+) -> Tuple[float, List[Tuple[str, PostClassification]]]:
     """
     Get classification from analyzer and return subnet relevance data.
     
@@ -388,19 +380,24 @@ def top_k_relevance_from_analyzer(text: str, analyzer, k: int = 5, analysis_resu
     return 1.0, [(subnet_name, classification_data)]  # Binary: matched or not
 
 
-def score_post_entry(entry: TweetWithAuthor, analyzer, k: int = 5, analysis_result: PostClassification = None) -> Dict:
+def score_post_entry(
+    entry: TweetWithAuthor,
+    analyzer: SubnetRelevanceAnalyzer,
+    k: int = 5,
+    analysis_result: PostClassification = None
+) -> Dict:
     """
     Score a single post entry with rich classification data preserved.
-    
+
     Returns both the final score AND the full classification object, so downstream
     consumers can use the rich categorical data for database storage, analytics, etc.
-    
+
     Args:
         entry: TweetWithAuthor object
         analyzer: SubnetRelevanceAnalyzer instance
         k: Kept for API compatibility (not used anymore - we return 1 subnet or none)
         analysis_result: Optional pre-computed analysis result dict
-        
+
     Returns:
         Dictionary containing:
             - url: Original post URL/identifier
@@ -414,20 +411,7 @@ def score_post_entry(entry: TweetWithAuthor, analyzer, k: int = 5, analysis_resu
     info = entry
 
     # Check if post is older than 10 days - if so, return 0 score
-    if not info.created_at:
-        return {
-            "url": entry.url,
-            "classification": None,
-            "subnet_data": None,
-            "relevance": 0.0,
-            "value": 0.0,
-            "recency": 0.0,
-            "score": 0.0
-        }
-    post_date_str = info.created_at if isinstance(info.created_at, str) else info.created_at.isoformat()
-    dt = datetime.fromisoformat(post_date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-    age_days = (datetime.now(timezone.utc) - dt).total_seconds() / (3600.0 * 24.0)
-    if age_days > 10:
+    if is_post_too_old(info.created_at):
         return {
             "url": entry.url,
             "classification": None,
