@@ -18,7 +18,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 
-import copy
 import typing
 import numpy as np
 import asyncio
@@ -62,8 +61,8 @@ class BaseValidatorNeuron(BaseNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        # Save a copy of the hotkeys to local memory.
-        self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
+        # Save a copy of the hotkeys to local memory
+        self.hotkeys = list(self.metagraph.hotkeys)
 
         # Dendrite lets us send messages to other nodes (axons) in the network.
         if self.config.mock:
@@ -498,14 +497,15 @@ class BaseValidatorNeuron(BaseNeuron):
         """Resyncs the metagraph and updates the hotkeys and moving averages based on the new metagraph."""
         bt.logging.info("resync_metagraph()")
 
-        # Copies state of metagraph before syncing.
-        previous_metagraph = copy.deepcopy(self.metagraph)
+        # Save only what we need for comparison (shallow copy of axons list).
+        # Avoids memory growth from deepcopying the entire metagraph object.
+        previous_axons = list(self.metagraph.axons)
 
         # Sync the metagraph.
         self.metagraph.sync(subtensor=self.subtensor)
 
         # Check if the metagraph axon info has changed.
-        if previous_metagraph.axons == self.metagraph.axons:
+        if previous_axons == list(self.metagraph.axons):
             return
 
         bt.logging.info(
@@ -525,8 +525,8 @@ class BaseValidatorNeuron(BaseNeuron):
             new_moving_average[:min_len] = self.scores[:min_len]
             self.scores = new_moving_average
 
-        # Update the hotkeys.
-        self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
+        # Update the hotkeys
+        self.hotkeys = list(self.metagraph.hotkeys)
 
     def update_scores(self, rewards: np.ndarray, uids: List[int]):
         """Performs exponential moving average on the scores based on the rewards received from the miners."""
