@@ -36,6 +36,13 @@ def _get_subtensor() -> Subtensor:
 def _reset_subtensor():
     """Reset the shared Subtensor instance (e.g., on connection errors)."""
     global _subtensor_instance
+    if _subtensor_instance is not None:
+        try:
+            # Close the WebSocket connection before discarding.
+            if hasattr(_subtensor_instance, 'substrate') and _subtensor_instance.substrate:
+                _subtensor_instance.substrate.close()
+        except Exception:
+            pass
     _subtensor_instance = None
     bt.logging.debug("[burn] Reset shared Subtensor instance")
 

@@ -497,8 +497,7 @@ class BaseValidatorNeuron(BaseNeuron):
         """Resyncs the metagraph and updates the hotkeys and moving averages based on the new metagraph."""
         bt.logging.info("resync_metagraph()")
 
-        # Save only what we need for comparison (shallow copy of axons list).
-        # Avoids memory growth from deepcopying the entire metagraph object.
+        # Save axons for comparison (shallow copy is sufficient for equality check).
         previous_axons = list(self.metagraph.axons)
 
         # Sync the metagraph.

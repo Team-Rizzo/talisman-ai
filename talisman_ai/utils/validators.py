@@ -60,12 +60,9 @@ def get_validator_data(
             try:
                 if metagraph is None:
                     if subtensor is None:
-                        # bittensor v10: Subtensor is a class (old bt.subtensor() helper removed).
-                        subtensor = (
-                            bt.Subtensor(config=getattr(config, "bt_config", None))
-                            if hasattr(config, "bt_config")
-                            else bt.Subtensor()
-                        )
+                        # Reuse shared Subtensor instance for efficiency.
+                        from talisman_ai.utils.burn import _get_subtensor
+                        subtensor = _get_subtensor()
                     if netuid is None:
                         raise ValueError("netuid must be provided if metagraph is not provided")
                     metagraph = subtensor.metagraph(netuid)

@@ -7,6 +7,8 @@ Validator entrypoint.
 """
 
 import asyncio
+import concurrent.futures
+import gc
 import time
 from typing import List, Optional, Set
 
@@ -42,6 +44,14 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, bt_config=None):
         # NOTE: this arg name must not shadow the imported `talisman_ai.config` module.
         super(Validator, self).__init__(config=bt_config)
+
+        # Use a bounded thread pool for CPU-bound validation tasks.
+        # Provides predictable resource usage regardless of system core count.
+        self._validation_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=8,
+            thread_name_prefix="validation_"
+        )
+        bt.logging.info("[INIT] Created validation executor with 8 workers")
 
         bt.logging.info("load_state()")
         self.load_state()
@@ -168,7 +178,9 @@ class Validator(BaseValidatorNeuron):
             return False
 
         # Validate by re-running analyzer on sampled posts.
-        is_valid, validation_result = await asyncio.to_thread(
+        loop = asyncio.get_running_loop()
+        is_valid, validation_result = await loop.run_in_executor(
+            self._validation_executor,
             validate_miner_batch, tweet_batch, self._analyzer, 1
         )
         if not is_valid:
@@ -377,7 +389,30 @@ class Validator(BaseValidatorNeuron):
             bt.logging.info("[VALIDATION] Started validation client")
 
         self.save_state()
+        
+        # Periodically prune old data to prevent memory growth (every 100 steps)
+        if self.step % 100 == 0:
+            self._prune_stores()
+        
         return await forward(self)
+    
+    def _prune_stores(self):
+        """Prune old data from stores to maintain bounded memory usage."""
+        try:
+            # Prune tweet store: remove submitted tweets and old unprocessed ones
+            self._tweet_store.prune_old_tweets(max_age_seconds=3600, max_tweets=1000)
+            self._tweet_store.save_to_file()
+            
+            # Save reward/penalty stores (pruning happens in update_current_epoch)
+            self._miner_reward.save_to_file()
+            self._miner_penalty.save_to_file()
+            
+            # Explicit GC helps long-running processes reclaim memory promptly.
+            collected = gc.collect()
+            
+            bt.logging.info(f"[PRUNE] Pruned stores at step {self.step}, GC collected {collected} objects")
+        except Exception as e:
+            bt.logging.warning(f"[PRUNE] Failed to prune stores: {e}")
 
     async def forward_validator_rewards(self, synapse: ValidatorRewards) -> ValidatorRewards:
         """

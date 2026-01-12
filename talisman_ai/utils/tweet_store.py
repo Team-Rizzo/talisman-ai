@@ -253,6 +253,49 @@ class TweetStore:
         for tweet_id in tweet_ids_to_delete:
             del self._tweets[tweet_id]
 
+    def prune_old_tweets(self, max_age_seconds: float = 3600, max_tweets: int = 1000):
+        """
+        Prune old tweets to maintain bounded memory usage.
+        
+        Removes:
+        - Tweets that have been submitted to API (already processed)
+        - Tweets older than max_age_seconds that are still unprocessed
+        - Oldest tweets if store exceeds max_tweets
+        
+        Args:
+            max_age_seconds: Maximum age for unprocessed tweets (default: 1 hour)
+            max_tweets: Maximum number of tweets to keep (default: 1000)
+        """
+        import time as _time
+        now = _time.time()
+        
+        # First, delete all submitted tweets
+        self.delete_submitted_tweets()
+        
+        # Delete old unprocessed tweets (likely stale/abandoned)
+        tweet_ids_to_delete = []
+        for tweet_id, item in self._tweets.items():
+            # Skip tweets that are actively processing
+            if item.status == TweetStatus.PROCESSING:
+                continue
+            # Delete unprocessed tweets older than max_age
+            if item.start_time is not None and (now - item.start_time) > max_age_seconds:
+                tweet_ids_to_delete.append(tweet_id)
+        
+        for tweet_id in tweet_ids_to_delete:
+            del self._tweets[tweet_id]
+        
+        # If still too many tweets, delete oldest ones (by start_time or insertion order)
+        if len(self._tweets) > max_tweets:
+            # Sort by start_time (None = very old), keep newest
+            sorted_items = sorted(
+                self._tweets.items(),
+                key=lambda x: x[1].start_time or 0
+            )
+            excess = len(self._tweets) - max_tweets
+            for tweet_id, _ in sorted_items[:excess]:
+                del self._tweets[tweet_id]
+
     def delete_tweet(self, tweet_id):
         """
         Deletes a tweet from the store.

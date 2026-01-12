@@ -47,6 +47,10 @@ class MinerReward:
             self.epoch_rewards[epoch] = {}
             self.current_epoch_old = self.current_epoch
             self.current_epoch = epoch
+            # Keep only the last 10 epochs to bound memory usage.
+            max_epochs = 10
+            while len(self.epoch_rewards) > max_epochs:
+                self.delete_oldest_epoch()
     
     def delete_oldest_epoch(self):
         """Delete the oldest epoch from the rewards store."""
