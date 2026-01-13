@@ -37,9 +37,11 @@ from talisman_ai.base.utils.weight_utils import (
 )  # TODO: Replace when bittensor switches to numpy
 from talisman_ai.mock import MockDendrite
 from talisman_ai.utils.config import add_validator_args
+from talisman_ai.utils.api_client import TalismanAPIClient
 from talisman_ai.protocol import TweetBatch
 from talisman_ai.protocol import ValidatorRewards
 from talisman_ai.protocol import ValidatorPenalties
+from talisman_ai import config
 
 
 class BaseValidatorNeuron(BaseNeuron):
@@ -93,6 +95,82 @@ class BaseValidatorNeuron(BaseNeuron):
         self.thread: Union[threading.Thread, None] = None
         self.lock = asyncio.Lock()
    
+
+    def _verify_axon_reachable(self):
+        """
+        Verify the axon is reachable from the internet by requesting the Talisman API
+        to ping it. Exits with a fatal error if the axon is not reachable.
+        """
+        import asyncio
+        import os
+        import sys
+        import time
+        import signal
+
+        axon = getattr(self, "axon", None)
+        if axon is None:
+            return
+
+        # Get external IP and port from axon
+        external_ip = axon.external_ip
+        external_port = axon.external_port
+
+        bt.logging.info(
+            f"Verifying axon is reachable at {external_ip}:{external_port}..."
+        )
+
+        async def _check():
+            # Use a longer timeout since the API needs time to attempt connecting
+            # to the axon port (up to 10 seconds) plus network latency
+            client = TalismanAPIClient(
+                base_url=config.MINER_API_URL,
+                wallet=self.wallet,
+                timeout=60.0,  # 60s to ensure API has time to respond
+                max_retries=2,  # Retry once on transient failures
+                retry_delay=1.0,
+            )
+            try:
+                result = await client.check_axon(ip=external_ip, port=external_port)
+                return result
+            finally:
+                await client.close()
+
+        try:
+            result = self.loop.run_until_complete(_check())
+        except Exception as e:
+            bt.logging.error(f"Failed to verify axon reachability: {e}")
+            bt.logging.error("")
+            bt.logging.error("=" * 70)
+            bt.logging.error("FATAL: Could not contact Talisman API for axon verification.")
+            bt.logging.error("Please ensure your network allows outbound connections to the API.")
+            bt.logging.error("=" * 70)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            time.sleep(0.5)  # Allow logs to flush
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        if not result.get("reachable", False):
+            error_msg = result.get("error", "Unknown error")
+            bt.logging.error("")
+            bt.logging.error("=" * 70)
+            bt.logging.error("FATAL: Axon port verification FAILED!")
+            bt.logging.error(f"Your axon at {external_ip}:{external_port} is NOT reachable from the internet.")
+            bt.logging.error("")
+            bt.logging.error(f"Error: {error_msg}")
+            bt.logging.error("")
+            bt.logging.error("Please check:")
+            bt.logging.error(f"  - Firewall rules allow inbound TCP on port {external_port}")
+            bt.logging.error("  - Port forwarding is configured if behind NAT")
+            bt.logging.error(f"  - --axon.external_ip is set correctly (currently: {external_ip})")
+            bt.logging.error("=" * 70)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            time.sleep(0.5)  # Allow logs to flush
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        bt.logging.success(
+            f"Axon verification PASSED - {external_ip}:{external_port} is reachable!"
+        )
 
     def serve_axon(self):
         """Serve axon to enable external connections."""
@@ -342,6 +420,9 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.axon.start()
             except Exception as e:
                 bt.logging.error(f"Failed to start validator axon: {e}")
+
+            # Verify axon is reachable from the internet via Talisman API handshake
+            self._verify_axon_reachable()
 
         bt.logging.info(f"Validator starting at block: {self.block}")
 

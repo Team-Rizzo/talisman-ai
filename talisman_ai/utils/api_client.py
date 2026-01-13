@@ -546,6 +546,29 @@ class TalismanAPIClient:
         data = await self._request("GET", "/price/tao-usd")
         return TaoPriceResponse(**data)
 
+    # =========================================================================
+    # Axon Verification
+    # =========================================================================
+
+    async def check_axon(self, ip: str, port: int) -> Dict[str, Any]:
+        """
+        Request the API to verify this validator's axon is reachable.
+        
+        The API will attempt to ping the axon at the given IP:port.
+        
+        Args:
+            ip: The external IP address of the axon
+            port: The axon port
+            
+        Returns:
+            Dict with 'reachable' (bool) and optional 'error' (str)
+        """
+        return await self._request(
+            "POST",
+            "/axon/check",
+            json={"ip": ip, "port": port},
+        )
+
 
 # =============================================================================
 # Synchronous Wrapper (for convenience)
