@@ -110,7 +110,7 @@ MESSAGE_MAX_PROCESS_TIME = float(os.getenv("MESSAGE_MAX_PROCESS_TIME", os.getenv
 PENALTY_STORE_LOCATION = os.getenv("PENALTY_STORE_LOCATION", str(_SUBNET_ROOT / ".penalty_store.json"))
 REWARD_STORE_LOCATION = os.getenv("REWARD_STORE_LOCATION", str(_SUBNET_ROOT / ".reward_store.json"))
 
-USD_PRICE_PER_POINT = float(os.getenv("USD_PRICE_PER_POINT", "0.020"))
+USD_PRICE_PER_POINT = float(os.getenv("USD_PRICE_PER_POINT", "0.040"))
 FINNEY_RPC = os.getenv("FINNEY_RPC", "wss://entrypoint-finney.opentensor.ai:443")
 
 EPOCH_LENGTH = int(os.getenv("EPOCH_LENGTH", "100"))
