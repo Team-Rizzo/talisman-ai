@@ -163,3 +163,13 @@ testing/
 
 # Editors
 .vscode/settings.json
+
+# Local subnet runtime/config/state (do not commit)
+.miner_env
+.vali_env
+.tweet_store.json
+.telegram_store.json
+.reward_store.json
+.penalty_store.json
+.broadcast_state.json
+.penalty_broadcast_state.json
