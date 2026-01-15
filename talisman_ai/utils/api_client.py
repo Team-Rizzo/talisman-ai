@@ -48,6 +48,11 @@ from talisman_ai.utils.api_models import (
     CompletedTweetSubmission,
     SubmissionResponse,
     TaoPriceResponse,
+    # Telegram models
+    TelegramGroup, TelegramMessage, TelegramMessageAnalysis,
+    TelegramMessageWithContext, TelegramMessageForScoring,
+    TelegramMessagesForScoringResponse,
+    CompletedTelegramMessageSubmission,
 )
 
 logger = logging.getLogger(__name__)
@@ -533,6 +538,119 @@ class TalismanAPIClient:
         return SubmissionResponse(**data)
     
     # =========================================================================
+    # Telegram Message Methods
+    # =========================================================================
+    
+    async def get_unscored_telegram_messages(self, limit: int = 3) -> List[TelegramMessageForScoring]:
+        """
+        Get telegram messages that haven't been scored yet.
+        
+        This will mark the returned messages as "in_progress" and assign them
+        to your validator hotkey.
+        
+        Each message includes context:
+        - If the message is a reply, the parent message is included with its classification
+        - If not a reply, the previous 2 messages in the same group are included
+        - inherited_subnet_id/inherited_subnet_name are set if context has classification
+        
+        Args:
+            limit: Maximum number of messages to return (default: 3)
+            
+        Returns:
+            List of TelegramMessageForScoring objects with context
+        """
+        data = await self._request("GET", "/telegram/messages/unscored", params={"limit": limit})
+        
+        messages = []
+        for msg_data in data.get("messages", []):
+            # Parse nested group
+            group_data = msg_data.pop("group", None)
+            group = TelegramGroup(**group_data) if group_data else None
+            
+            # Parse nested analysis
+            analysis_data = msg_data.pop("analysis", None)
+            analysis = TelegramMessageAnalysis(**analysis_data) if analysis_data else None
+            
+            # Parse context messages
+            context_messages_data = msg_data.pop("contextMessages", [])
+            context_messages = []
+            for ctx_data in context_messages_data:
+                ctx_group_data = ctx_data.pop("group", None)
+                ctx_group = TelegramGroup(**ctx_group_data) if ctx_group_data else None
+                
+                ctx_analysis_data = ctx_data.pop("analysis", None)
+                ctx_analysis = TelegramMessageAnalysis(**ctx_analysis_data) if ctx_analysis_data else None
+                
+                context_messages.append(TelegramMessageWithContext(
+                    **ctx_data,
+                    group=ctx_group,
+                    analysis=ctx_analysis,
+                ))
+            
+            message = TelegramMessageForScoring(
+                **msg_data,
+                group=group,
+                analysis=analysis,
+                contextMessages=context_messages,
+            )
+            messages.append(message)
+        
+        return messages
+    
+    async def submit_completed_telegram_messages(
+        self,
+        completed_messages: List[Union[CompletedTelegramMessageSubmission, Dict[str, Any]]],
+    ) -> SubmissionResponse:
+        """
+        Submit completed scored telegram messages.
+        
+        Args:
+            completed_messages: List of completed messages with message_id (str) and sentiment
+            
+        Returns:
+            SubmissionResponse with success status
+            
+        Example:
+            await client.submit_completed_telegram_messages([
+                {"message_id": "abc123", "sentiment": "bullish", "subnet_id": 18},
+                {"message_id": "def456", "sentiment": "bearish"},
+            ])
+        """
+        submissions = []
+        for item in completed_messages:
+            if isinstance(item, dict):
+                submissions.append(item)
+            else:
+                submission = {
+                    "message_id": item.message_id,
+                    "sentiment": item.sentiment,
+                }
+                # Add optional fields if present
+                if item.subnet_id is not None:
+                    submission["subnet_id"] = item.subnet_id
+                if item.subnet_name is not None:
+                    submission["subnet_name"] = item.subnet_name
+                if item.content_type is not None:
+                    submission["content_type"] = item.content_type
+                if item.technical_quality is not None:
+                    submission["technical_quality"] = item.technical_quality
+                if item.market_analysis is not None:
+                    submission["market_analysis"] = item.market_analysis
+                if item.impact_potential is not None:
+                    submission["impact_potential"] = item.impact_potential
+                if item.relevance_confidence is not None:
+                    submission["relevance_confidence"] = item.relevance_confidence
+                submissions.append(submission)
+        
+        data = await self._request(
+            "POST",
+            "/telegram/messages/completed",
+            json={"completed_messages": submissions},
+        )
+        
+        return SubmissionResponse(**data)
+    
+    # =========================================================================
     # Price Methods
     # =========================================================================
     
@@ -686,6 +804,19 @@ class TalismanAPIClientSync:
     def remove_blacklisted_hotkey(self, hotkey: str) -> SubmissionResponse:
         """Remove a hotkey from the blacklist."""
         return self._run(self._async_client.remove_blacklisted_hotkey(hotkey))
+    
+    # Telegram Message Methods
+    
+    def get_unscored_telegram_messages(self, limit: int = 3) -> List[TelegramMessageForScoring]:
+        """Get telegram messages that haven't been scored yet."""
+        return self._run(self._async_client.get_unscored_telegram_messages(limit))
+    
+    def submit_completed_telegram_messages(
+        self,
+        completed_messages: List[Union[CompletedTelegramMessageSubmission, Dict[str, Any]]],
+    ) -> SubmissionResponse:
+        """Submit completed scored telegram messages."""
+        return self._run(self._async_client.submit_completed_telegram_messages(completed_messages))
     
     def get_tao_price(self) -> TaoPriceResponse:
         """Get the cached TAO/USD price."""

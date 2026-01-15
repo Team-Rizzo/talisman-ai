@@ -8,7 +8,7 @@ import random
 
 from talisman_ai import config
 from talisman_ai.utils.api_client import TalismanAPIClient
-from talisman_ai.utils.api_models import TweetWithAuthor
+from talisman_ai.utils.api_models import TweetWithAuthor, TelegramMessageForScoring
 from talisman_ai.utils.burn import calculate_weights
 from talisman_ai.models.reward import Reward
 from talisman_ai.protocol import ValidatorRewards
@@ -62,12 +62,14 @@ class ValidationClient:
     async def run(
         self,
         on_tweets: Callable[[List[TweetWithAuthor]], Any],
+        on_telegram_messages: Callable[[List[TelegramMessageForScoring]], Any] = None,
     ):
         """
         Main validation loop.
         
         Args:
             on_tweets: Callback for batch of tweets (async or sync)
+            on_telegram_messages: Callback for batch of telegram messages (async or sync)
         """
         self._running = True
         bt.logging.info("[ValidationClient.run] Entering main validation loop (poll_interval=%ss, scores_interval=%s blocks)", self.poll_seconds, self.scores_block_interval)
@@ -106,6 +108,29 @@ class ValidationClient:
                         bt.logging.debug("[ValidationClient.run] Awaiting on_tweets coroutine")
                         await maybe_coro
 
+                # Fetch unscored telegram messages
+                if on_telegram_messages is not None:
+                    try:
+                        bt.logging.debug("[ValidationClient.run] Checking for timed-out telegram messages")
+                        timed_out_messages = self._validator._telegram_store.get_timeouts()
+                        for msg_item in timed_out_messages:
+                            bt.logging.debug(f"[ValidationClient.run] Resetting timed out telegram message {msg_item.message.id} to unprocessed")
+                            self._validator._telegram_store.reset_to_unprocessed(msg_item.message.id)
+                            if msg_item.hotkey:
+                                bt.logging.info(f"[ValidationClient.run] Adding penalty to hotkey {msg_item.hotkey} for telegram message id {msg_item.message.id}")
+                                self._validator._miner_penalty.add_penalty(msg_item.hotkey, 1)
+                        bt.logging.debug("[ValidationClient.run] Fetching unscored telegram messages from api and local store")
+                        unscored_telegram_messages = (await self.api_client.get_unscored_telegram_messages(limit=config.MINER_BATCH_SIZE)) + [item.message for item in self._validator._telegram_store.get_unprocessed_messages()]
+                        
+                        if unscored_telegram_messages:
+                            bt.logging.debug(f"[ValidationClient.run] Passing {len(unscored_telegram_messages)} unscored telegram messages to on_telegram_messages() callback")
+                            maybe_coro = on_telegram_messages(unscored_telegram_messages)
+                            if asyncio.iscoroutine(maybe_coro):
+                                bt.logging.debug("[ValidationClient.run] Awaiting on_telegram_messages coroutine")
+                                await maybe_coro
+                    except Exception as e:
+                        bt.logging.warning(f"[ValidationClient.run] Failed to fetch/process telegram messages: {e}")
+
                 # Submit tweets processed locally but not yet submitted to the API.
                 ready = self._validator._tweet_store.get_ready_to_submit()
                 bt.logging.debug(f"[ValidationClient.run] Checking {len(ready) if ready else 0} tweets ready to submit to API")
@@ -121,12 +146,32 @@ class ValidationClient:
                             bt.logging.warning(f"[ValidationClient.run] Failed to submit completed tweet {item.tweet.id}: {e}")
                             continue
 
+                # Submit telegram messages processed locally but not yet submitted to the API.
+                telegram_ready = self._validator._telegram_store.get_ready_to_submit()
+                bt.logging.debug(f"[ValidationClient.run] Checking {len(telegram_ready) if telegram_ready else 0} telegram messages ready to submit to API")
+                if telegram_ready:
+                    for item in telegram_ready:
+                        try:
+                            bt.logging.debug(f"[ValidationClient.run] Submitting telegram message {item.message.id} to API")
+                            await self._validator._submit_telegram_batch([item.message])
+                            self._validator._telegram_store.mark_submitted(item.message.id)
+                            self._validator._telegram_store.delete_message(item.message.id)
+                            bt.logging.info(f"[ValidationClient.run] Successfully submitted telegram message {item.message.id} and removed it from store")
+                        except Exception as e:
+                            bt.logging.warning(f"[ValidationClient.run] Failed to submit completed telegram message {item.message.id}: {e}")
+                            continue
+
                 # Persist local state.
                 try:
                     bt.logging.debug("[ValidationClient.run] Saving tweet store to disk")
                     self._validator._tweet_store.save_to_file()
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] Failed to persist tweet store: {e}")
+                try:
+                    bt.logging.debug("[ValidationClient.run] Saving telegram store to disk")
+                    self._validator._telegram_store.save_to_file()
+                except Exception as e:
+                    bt.logging.debug(f"[ValidationClient.run] Failed to persist telegram store: {e}")
 
                 # ---- Broadcast rewards + penalties to other validators ----
                 current_epoch = self._validator._miner_reward._get_current_epoch()
@@ -330,6 +375,7 @@ class ValidationClient:
                 self._validator._penalty_broadcasts.save()
                 self._validator._reward_broadcasts.save()
                 self._validator._tweet_store.save_to_file()
+                self._validator._telegram_store.save_to_file()
                 self._validator._miner_reward.save()
                 self._validator._miner_penalty.save()
                 

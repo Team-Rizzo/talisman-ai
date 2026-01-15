@@ -18,8 +18,9 @@ from typing import Dict, List, Tuple
 import random
 import bittensor as bt
 
-from talisman_ai.utils.api_models import TweetWithAuthor
+from talisman_ai.utils.api_models import TweetWithAuthor, TelegramMessageForScoring
 from .relevance import SubnetRelevanceAnalyzer, PostClassification
+from .telegram_relevance import TelegramRelevanceAnalyzer, MessageGroupClassification
 
 
 # ===== Normalization Caps =====
@@ -243,6 +244,171 @@ def validate_miner_batch(
         bt.logging.success(f"[Validator] Batch ACCEPTED: {matches}/{sample_size} matches")
     else:
         bt.logging.warning(f"[Validator] Batch REJECTED: {matches}/{sample_size} matches, {len(discrepancies)} discrepancies")
+    
+    return is_valid, result
+
+
+def validate_miner_telegram_batch(
+    miner_batch: List[TelegramMessageForScoring],
+    analyzer: TelegramRelevanceAnalyzer,
+    sample_size: int = 1,
+    seed: int = None
+) -> Tuple[bool, Dict]:
+    """
+    Validate a miner's telegram message batch by sampling messages and checking classifications.
+    
+    All fields require exact match:
+    subnet_id, sentiment, content_type, technical_quality, market_analysis, impact_potential
+    
+    Args:
+        miner_batch: List of TelegramMessageForScoring objects
+        analyzer: TelegramRelevanceAnalyzer instance
+        sample_size: Number of messages to sample (default: 1)
+        seed: Random seed for reproducible sampling
+        
+    Returns:
+        Tuple of (is_valid, result_dict)
+    """
+    if seed is not None:
+        random.seed(seed)
+    
+    sample_size = min(sample_size, len(miner_batch))
+    sampled_messages = random.sample(miner_batch, sample_size)
+    
+    bt.logging.info(f"[Validator] Sampling {sample_size} message(s) from telegram batch of {len(miner_batch)}")
+    
+    matches = 0
+    discrepancies = []
+    
+    for i, msg_data in enumerate(sampled_messages):
+        msg_content = msg_data.content
+        miner_analysis = msg_data.analysis
+        
+        if miner_analysis is None:
+            bt.logging.warning(f"[Validator] No miner classification for telegram message {i+1}")
+            discrepancies.append({
+                "message_index": i,
+                "reason": "missing_miner_classification",
+                "message_preview": msg_content[:100] if msg_content else ""
+            })
+            continue
+        
+        # Build message dict for analyzer
+        messages_for_analysis = [{
+            'message_id': msg_data.id,
+            'username': msg_data.sender_username or msg_data.sender_name,
+            'content': msg_data.content,
+        }]
+        
+        # Add context messages if available
+        if msg_data.context_messages:
+            for ctx in msg_data.context_messages:
+                messages_for_analysis.insert(0, {
+                    'message_id': ctx.id,
+                    'username': ctx.sender_username or ctx.sender_name,
+                    'content': ctx.content,
+                })
+        
+        # Get inherited subnet_id if available (don't reclassify)
+        inherited_subnet_id = msg_data.inherited_subnet_id
+        
+        validator_result = analyzer.classify_message_group(messages_for_analysis, subnet_id=inherited_subnet_id)
+        if validator_result is None:
+            bt.logging.warning(f"[Validator] Failed to classify telegram message {i+1}")
+            discrepancies.append({
+                "message_index": i,
+                "reason": "validator_classification_failed",
+                "message_preview": msg_content[:100] if msg_content else ""
+            })
+            continue
+        
+        # Helper to safely lowercase for case-insensitive comparison
+        def _lower(val):
+            return val.lower() if isinstance(val, str) else val
+        
+        # Extract miner fields
+        m_subnet = miner_analysis.subnet_id
+        m_sent = miner_analysis.sentiment
+        m_content = miner_analysis.content_type
+        m_tech = miner_analysis.technical_quality
+        m_market = miner_analysis.market_analysis
+        m_impact = miner_analysis.impact_potential
+        
+        # Extract validator fields
+        v_subnet = validator_result.subnet_id
+        v_sent = validator_result.sentiment.value if validator_result.sentiment else None
+        v_content = validator_result.content_type.value if validator_result.content_type else None
+        v_tech = validator_result.technical_quality.value if validator_result.technical_quality else None
+        v_market = validator_result.market_analysis.value if validator_result.market_analysis else None
+        v_impact = validator_result.impact_potential.value if validator_result.impact_potential else None
+        
+        # Check matches (case-insensitive for string fields)
+        subnet_ok = m_subnet == v_subnet
+        sentiment_ok = _lower(m_sent) == _lower(v_sent)
+        content_ok = _lower(m_content) == _lower(v_content)
+        tech_ok = _lower(m_tech) == _lower(v_tech)
+        market_ok = _lower(m_market) == _lower(v_market)
+        impact_ok = _lower(m_impact) == _lower(v_impact)
+        
+        all_ok = subnet_ok and sentiment_ok and content_ok and tech_ok and market_ok and impact_ok
+        
+        if all_ok:
+            matches += 1
+            bt.logging.debug(f"[Validator] Telegram message {i+1}: MATCH")
+        else:
+            # Build list of failed fields for detailed logging
+            failed_fields = []
+            if not subnet_ok:
+                failed_fields.append(f"subnet_id (miner={m_subnet} vs validator={v_subnet})")
+            if not sentiment_ok:
+                failed_fields.append(f"sentiment (miner={m_sent} vs validator={v_sent})")
+            if not content_ok:
+                failed_fields.append(f"content_type (miner={m_content} vs validator={v_content})")
+            if not tech_ok:
+                failed_fields.append(f"technical_quality (miner={m_tech} vs validator={v_tech})")
+            if not market_ok:
+                failed_fields.append(f"market_analysis (miner={m_market} vs validator={v_market})")
+            if not impact_ok:
+                failed_fields.append(f"impact_potential (miner={m_impact} vs validator={v_impact})")
+            
+            # Log detailed mismatch info
+            bt.logging.warning(f"[Validator] Telegram message {i+1}: MISMATCH - Failed fields: {', '.join(failed_fields)}")
+            bt.logging.warning(f"[Validator] Telegram message {i+1} text preview: {msg_content[:200] if msg_content else '(empty)'}")
+            bt.logging.warning(f"[Validator] Telegram message {i+1} Miner: subnet_id={m_subnet}, sentiment={m_sent}, content_type={m_content}")
+            bt.logging.warning(f"[Validator] Telegram message {i+1} Validator: subnet_id={v_subnet}, sentiment={v_sent}, content_type={v_content}")
+            
+            discrepancies.append({
+                "message_index": i,
+                "reason": "classification_mismatch",
+                "miner": {
+                    "subnet_id": m_subnet, "sentiment": m_sent, "content_type": m_content,
+                    "technical_quality": m_tech, "market_analysis": m_market, "impact_potential": m_impact
+                },
+                "validator": {
+                    "subnet_id": v_subnet, "sentiment": v_sent, "content_type": v_content,
+                    "technical_quality": v_tech, "market_analysis": v_market, "impact_potential": v_impact
+                },
+                "field_results": {
+                    "subnet_id": subnet_ok, "sentiment": sentiment_ok, "content_type": content_ok,
+                    "technical_quality": tech_ok, "market_analysis": market_ok, "impact_potential": impact_ok
+                },
+                "message_preview": msg_content[:100] if msg_content else ""
+            })
+    
+    is_valid = matches == sample_size and len(discrepancies) == 0
+    
+    result = {
+        "is_valid": is_valid,
+        "matches": matches,
+        "total_sampled": sample_size,
+        "discrepancies": discrepancies,
+        "match_rate": matches / sample_size if sample_size > 0 else 0.0
+    }
+    
+    if is_valid:
+        bt.logging.success(f"[Validator] Telegram batch ACCEPTED: {matches}/{sample_size} matches")
+    else:
+        bt.logging.warning(f"[Validator] Telegram batch REJECTED: {matches}/{sample_size} matches, {len(discrepancies)} discrepancies")
     
     return is_valid, result
 

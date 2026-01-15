@@ -5,6 +5,7 @@ These models correspond to the Prisma schema and are used for
 request/response validation and serialization.
 """
 
+from datetime import datetime
 from typing import Optional, List, Any
 from pydantic import BaseModel, Field
 
@@ -359,3 +360,104 @@ class TaoPriceResponse(BaseModel):
     last_updated: str
     source: str
     stale: bool
+
+
+# ============================================================================
+# Telegram Models
+# ============================================================================
+
+class TelegramGroup(BaseModel):
+    """Telegram group model."""
+    id: str
+    telegram_id: int = Field(alias="telegramId")
+    title: str
+    is_monitored: bool = Field(False, alias="isMonitored")
+    is_muted: bool = Field(False, alias="isMuted")
+    muted_until: Optional[str] = Field(None, alias="mutedUntil")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class TelegramMessageAnalysis(BaseModel):
+    """Telegram message analysis model."""
+    id: int
+    message_id: str = Field(alias="messageId")
+    sentiment: Optional[str] = None
+    subnet_id: Optional[int] = Field(None, alias="subnetId")
+    subnet_name: Optional[str] = Field(None, alias="subnetName")
+    content_type: Optional[str] = Field(None, alias="contentType")
+    technical_quality: Optional[str] = Field(None, alias="technicalQuality")
+    market_analysis: Optional[str] = Field(None, alias="marketAnalysis")
+    impact_potential: Optional[str] = Field(None, alias="impactPotential")
+    relevance_confidence: Optional[str] = Field(None, alias="relevanceConfidence")
+    analyzed_at: str = Field(alias="analyzedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class TelegramMessage(BaseModel):
+    """Telegram message model."""
+    id: str
+    telegram_id: int = Field(alias="telegramId")
+    group_id: str = Field(alias="groupId")
+    sender_id: int = Field(alias="senderId")
+    sender_username: Optional[str] = Field(None, alias="senderUsername")
+    sender_name: str = Field(alias="senderName")
+    content: str
+    reply_to_id: Optional[int] = Field(None, alias="replyToId")
+    created_at: str = Field(alias="createdAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class TelegramMessageWithContext(TelegramMessage):
+    """Telegram message model with group and analysis context."""
+    group: Optional[TelegramGroup] = None
+    analysis: Optional[TelegramMessageAnalysis] = None
+
+
+class TelegramMessageForScoring(TelegramMessageWithContext):
+    """
+    Telegram message with context messages for scoring.
+    
+    Contains the main message plus context from:
+    - The message being replied to (if any) with its classification
+    - Previous messages in the conversation for context
+    """
+    context_messages: List["TelegramMessageWithContext"] = Field(
+        default_factory=list, alias="contextMessages"
+    )
+    inherited_subnet_id: Optional[int] = Field(None, alias="inheritedSubnetId")
+    inherited_subnet_name: Optional[str] = Field(None, alias="inheritedSubnetName")
+
+    class Config:
+        populate_by_name = True
+
+
+class TelegramMessagesForScoringResponse(BaseModel):
+    """Response model for getting telegram messages for scoring."""
+    messages: List[TelegramMessageForScoring]
+    count: int
+
+
+class CompletedTelegramMessageSubmission(BaseModel):
+    """Model for submitting a completed scored telegram message."""
+    message_id: str
+    sentiment: str
+    subnet_id: Optional[int] = None
+    subnet_name: Optional[str] = None
+    content_type: Optional[str] = None
+    technical_quality: Optional[str] = None
+    market_analysis: Optional[str] = None
+    impact_potential: Optional[str] = None
+    relevance_confidence: Optional[str] = None
+
+
+class CompletedTelegramMessagesSubmission(BaseModel):
+    """Model for submitting multiple completed scored telegram messages."""
+    completed_messages: List[CompletedTelegramMessageSubmission]

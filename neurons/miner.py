@@ -11,7 +11,8 @@ import talisman_ai
 # import base miner class which takes care of most of the boilerplate
 from talisman_ai.base.miner import BaseMinerNeuron
 from talisman_ai.analyzer import setup_analyzer
-from talisman_ai.utils.api_models import TweetAnalysisBase
+from talisman_ai.analyzer import setup_telegram_analyzer
+from talisman_ai.utils.api_models import TweetAnalysisBase, TelegramMessageAnalysis
 
 
 class Miner(BaseMinerNeuron):
@@ -28,6 +29,7 @@ class Miner(BaseMinerNeuron):
         # Initialize analyzer for tweet classification
         bt.logging.info("[Miner] Initializing analyzer...")
         self.analyzer = setup_analyzer()
+        self.telegram_analyzer = setup_telegram_analyzer()
         bt.logging.info("[Miner] Analyzer initialized")
         # NOTE: we intentionally do NOT reuse a single bt.Dendrite across threads/event-loops.
         # Miner responses are sent back to validators from a background thread with its own event loop.
@@ -41,6 +43,13 @@ class Miner(BaseMinerNeuron):
             priority_fn=self.priority_tweet_batch,
         )
         
+        # Register TelegramBatch handler
+        self.axon.attach(
+            forward_fn=self.forward_telegram_messages,
+            blacklist_fn=self.blacklist_telegram_batch,
+            priority_fn=self.priority_telegram_batch,
+        )
+        
         hotkey = self.wallet.hotkey.ss58_address
         bt.logging.info(f"[Miner] V3 miner started with hotkey: {hotkey}")
 
@@ -52,6 +61,16 @@ class Miner(BaseMinerNeuron):
 
     async def priority_tweet_batch(self, synapse: talisman_ai.protocol.TweetBatch) -> float:
         """Typed wrapper so bittensor's axon signature checks pass for TweetBatch."""
+        return await self.priority(synapse)
+
+    async def blacklist_telegram_batch(
+        self, synapse: talisman_ai.protocol.TelegramBatch
+    ) -> typing.Tuple[bool, str]:
+        """Typed wrapper so bittensor's axon signature checks pass for TelegramBatch."""
+        return await self.blacklist(synapse)
+
+    async def priority_telegram_batch(self, synapse: talisman_ai.protocol.TelegramBatch) -> float:
+        """Typed wrapper so bittensor's axon signature checks pass for TelegramBatch."""
         return await self.priority(synapse)
     
     async def forward_is_alive(self, synapse: talisman_ai.protocol.IsAlive) -> talisman_ai.protocol.IsAlive:
@@ -109,6 +128,40 @@ class Miner(BaseMinerNeuron):
         thread.start()
         
         bt.logging.info(f"[Miner] Started background processing for TweetBatch, returning immediately")
+        return synapse
+
+    async def forward_telegram_messages(self, synapse: talisman_ai.protocol.TelegramBatch) -> talisman_ai.protocol.TelegramBatch:
+        """
+        Processes TelegramBatch requests from validators.
+        
+        Spawns a background thread to analyze telegram messages and send results back to the validator.
+        Returns immediately to avoid blocking the axon.
+        
+        Args:
+            synapse: TelegramBatch containing list of messages to analyze
+            
+        Returns:
+            TelegramBatch (returns immediately, processing happens in background)
+        """
+        validator_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
+        bt.logging.info(f"[Miner] Received TelegramBatch with {len(synapse.message_batch)} message(s) from validator {validator_hotkey}")
+        
+        if not validator_hotkey:
+            bt.logging.warning("[Miner] No validator hotkey found in synapse, cannot send response back")
+            return synapse
+        
+        # Make a deep copy of the synapse for background processing
+        synapse_copy = copy.deepcopy(synapse)
+        
+        # Start background thread for processing and sending response
+        thread = threading.Thread(
+            target=self._process_and_send_telegram_messages,
+            args=(synapse_copy, validator_hotkey),
+            daemon=True
+        )
+        thread.start()
+        
+        bt.logging.info(f"[Miner] Started background processing for TelegramBatch, returning immediately")
         return synapse
 
     def _process_and_send_tweets(self, synapse: talisman_ai.protocol.TweetBatch, validator_hotkey: str):
@@ -199,6 +252,120 @@ class Miner(BaseMinerNeuron):
         except Exception as e:
             bt.logging.error(f"[Miner] Background: Error processing tweets: {e}")
 
+    def _process_and_send_telegram_messages(self, synapse: talisman_ai.protocol.TelegramBatch, validator_hotkey: str):
+        """
+        Background thread function to process telegram messages and send results back to validator.
+        
+        Args:
+            synapse: TelegramBatch to process
+            validator_hotkey: Hotkey of the validator to send results back to
+        """
+        try:
+            bt.logging.info(f"[Miner] Background: Processing {len(synapse.message_batch)} telegram messages")
+            
+            # Process each message
+            for msg in synapse.message_batch:
+                if not msg.content:
+                    bt.logging.warning(f"[Miner] Skipping telegram message {msg.id} - no content")
+                    continue
+                
+                # Build message dict for analyzer
+                messages_for_analysis = [{
+                    'message_id': msg.id,
+                    'username': msg.sender_username or msg.sender_name,
+                    'content': msg.content,
+                }]
+                
+                # Add context messages if available
+                if msg.context_messages:
+                    for ctx in msg.context_messages:
+                        messages_for_analysis.insert(0, {
+                            'message_id': ctx.id,
+                            'username': ctx.sender_username or ctx.sender_name,
+                            'content': ctx.content,
+                        })
+                
+                # Use inherited subnet_id if provided (don't reclassify)
+                inherited_subnet_id = msg.inherited_subnet_id
+                
+                # Classify the message group
+                classification = self.telegram_analyzer.classify_message_group(
+                    messages_for_analysis, 
+                    subnet_id=inherited_subnet_id
+                )
+                
+                if classification is None:
+                    bt.logging.warning(f"[Miner] Failed to classify telegram message {msg.id}")
+                    continue
+                
+                # Create analysis object with required fields for validator
+                from datetime import datetime
+                msg.analysis = TelegramMessageAnalysis(
+                    id=0,  # Placeholder, will be assigned by API
+                    message_id=msg.id,
+                    sentiment=classification.sentiment.value,
+                    subnet_id=classification.subnet_id,
+                    subnet_name=classification.subnet_name,
+                    content_type=classification.content_type.value,
+                    technical_quality=classification.technical_quality.value,
+                    market_analysis=classification.market_analysis.value,
+                    impact_potential=classification.impact_potential.value,
+                    relevance_confidence=classification.relevance_confidence,
+                    analyzed_at=datetime.now().isoformat(),
+                )
+            
+            bt.logging.info(f"[Miner] Background: Finished processing telegram messages, sending back to validator {validator_hotkey}")
+            
+            # Find validator UID and axon info from metagraph
+            try:
+                validator_uid = self.metagraph.hotkeys.index(validator_hotkey)
+            except ValueError:
+                bt.logging.error(f"[Miner] Validator hotkey {validator_hotkey} not found in metagraph")
+                return
+            
+            validator_axon = self.metagraph.axons[validator_uid]
+            bt.logging.info(f"[Miner] Background: Found validator UID {validator_uid}, sending telegram response via dendrite")
+            
+            # Send the processed batch back to the validator
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            dendrite = None
+            try:
+                dendrite = bt.Dendrite(wallet=self.wallet)
+                responses = loop.run_until_complete(
+                    dendrite.forward(
+                        axons=[validator_axon],
+                        synapse=synapse,
+                        timeout=30.0,
+                        deserialize=True,
+                    )
+                )
+                try:
+                    status_code = responses[0].dendrite.status_code if responses and responses[0].dendrite else None
+                    status_msg = responses[0].dendrite.status_message if responses and responses[0].dendrite else None
+                except Exception:
+                    status_code, status_msg = None, None
+                if status_code != 200:
+                    bt.logging.error(f"[Miner] Background: Validator response failed (status={status_code}): {status_msg}")
+                else:
+                    bt.logging.info(
+                        f"[Miner] Background: Successfully sent processed TelegramBatch back to validator {validator_hotkey}"
+                    )
+            except Exception as e:
+                bt.logging.error(f"[Miner] Background: Failed to send telegram response to validator: {e}")
+            finally:
+                try:
+                    if dendrite is not None:
+                        if hasattr(dendrite, "aclose_session"):
+                            loop.run_until_complete(dendrite.aclose_session())
+                        elif hasattr(dendrite, "close_session"):
+                            dendrite.close_session()
+                except Exception:
+                    pass
+                loop.close()
+                
+        except Exception as e:
+            bt.logging.error(f"[Miner] Background: Error processing telegram messages: {e}")
 
     async def forward_score(self, synapse: talisman_ai.protocol.Score) -> talisman_ai.protocol.Score:
         """

@@ -38,7 +38,7 @@ from talisman_ai.base.utils.weight_utils import (
 from talisman_ai.mock import MockDendrite
 from talisman_ai.utils.config import add_validator_args
 from talisman_ai.utils.api_client import TalismanAPIClient
-from talisman_ai.protocol import TweetBatch
+from talisman_ai.protocol import TweetBatch, TelegramBatch
 from talisman_ai.protocol import ValidatorRewards
 from talisman_ai.protocol import ValidatorPenalties
 from talisman_ai import config
@@ -201,6 +201,12 @@ class BaseValidatorNeuron(BaseNeuron):
                     blacklist_fn=self.blacklist_validator_penalties,
                     priority_fn=self.priority_validator_penalties,
                 )
+                # Allow miners to push TelegramBatch results back.
+                self.axon.attach(
+                    forward_fn=self.forward_telegram_messages,
+                    blacklist_fn=self.blacklist_telegram_messages,
+                    priority_fn=self.priority_telegram_messages,
+                )
                 bt.logging.info(
                     f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
                 )
@@ -217,6 +223,13 @@ class BaseValidatorNeuron(BaseNeuron):
     async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
         """
         Forward tweets to the network.
+        """
+        return synapse
+
+    async def forward_telegram_messages(self, synapse: talisman_ai.protocol.TelegramBatch) -> talisman_ai.protocol.TelegramBatch:
+        """
+        Forward telegram messages to the network.
+        Subclasses (e.g. neurons/validator.py) should override to validate miner responses.
         """
         return synapse
 
@@ -375,6 +388,45 @@ class BaseValidatorNeuron(BaseNeuron):
     async def priority_validator_penalties(self, synapse: ValidatorPenalties) -> float:
         """
         Priority validator penalties to the network.
+        """
+        return 1.0
+
+    async def blacklist_telegram_messages(
+        self, synapse: talisman_ai.protocol.TelegramBatch
+    ) -> typing.Tuple[bool, str]:
+        if synapse.dendrite is None or synapse.dendrite.hotkey is None:
+            bt.logging.warning(
+                "Received a request without a dendrite or hotkey."
+            )
+            return True, "Missing dendrite or hotkey"
+
+        # Check if hotkey is registered BEFORE trying to get its index
+        if (
+            not self.config.blacklist.allow_non_registered
+            and synapse.dendrite.hotkey not in self.metagraph.hotkeys
+        ):
+            # Ignore requests from un-registered entities.
+            bt.logging.trace(
+                f"Blacklisting un-registered hotkey {synapse.dendrite.hotkey}"
+            )
+            return True, "Unrecognized hotkey"
+
+        # Only get uid if hotkey is in metagraph (to avoid IndexError)
+        try:
+            uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
+        except ValueError:
+            # Hotkey not found in metagraph (shouldn't happen if check above passed, but be safe)
+            bt.logging.warning(f"Hotkey {synapse.dendrite.hotkey} not found in metagraph")
+            return True, "Hotkey not in metagraph"
+
+        bt.logging.trace(
+            f"Not Blacklisting recognized hotkey {synapse.dendrite.hotkey}"
+        )
+        return False, "Hotkey recognized!"
+
+    async def priority_telegram_messages(self, synapse: talisman_ai.protocol.TelegramBatch) -> float:
+        """
+        Priority telegram messages to the network.
         """
         return 1.0
     
