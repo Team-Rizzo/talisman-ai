@@ -47,13 +47,12 @@ class Validator(BaseValidatorNeuron):
         # NOTE: this arg name must not shadow the imported `talisman_ai.config` module.
         super(Validator, self).__init__(config=bt_config)
 
-        # Use a bounded thread pool for CPU-bound validation tasks.
-        # Provides predictable resource usage regardless of system core count.
+        _vw = int(getattr(config, "VALIDATION_MAX_WORKERS", 2))
         self._validation_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=8,
+            max_workers=_vw,
             thread_name_prefix="validation_"
         )
-        bt.logging.info("[INIT] Created validation executor with 8 workers")
+        bt.logging.info(f"[INIT] Created validation executor with {_vw} workers")
 
         bt.logging.info("load_state()")
         self.load_state()
@@ -655,6 +654,10 @@ class Validator(BaseValidatorNeuron):
         # Periodically prune old data to prevent memory growth (every 100 steps)
         if self.step % 100 == 0:
             self._prune_stores()
+            if hasattr(self._analyzer, '_cache'):
+                self._analyzer._cache.log_stats("TWEET_LLM_CACHE")
+            if hasattr(self._telegram_analyzer, '_cache'):
+                self._telegram_analyzer._cache.log_stats("TELEGRAM_LLM_CACHE")
         
         return await forward(self)
     

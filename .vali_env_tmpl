@@ -13,3 +13,9 @@ BATCH_HTTP_TIMEOUT=30.0
 VALIDATION_POLL_SECONDS=10
 # Blocks between fetching scores from /v2/scores endpoint (default: 100 blocks, ~20 minutes)
 SCORES_BLOCK_INTERVAL=100
+# Max concurrent validation threads making LLM calls.
+VALIDATION_MAX_WORKERS=2
+# How long (seconds) to cache LLM classification results for identical post text.
+LLM_CACHE_TTL=300
+# Maximum number of cached classification results held in memory.
+LLM_CACHE_MAX_SIZE=1024

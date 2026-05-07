@@ -15,6 +15,7 @@ Key Features:
 from openai import OpenAI
 import json
 import re
+import threading
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 import time
@@ -23,6 +24,7 @@ import bittensor as bt
 from difflib import SequenceMatcher
 
 from .classifications import ContentType, Sentiment, TechnicalQuality, MarketAnalysis, ImpactPotential
+from .llm_cache import LLMCache
 
 # Import centralized config
 try:
@@ -214,7 +216,13 @@ class SubnetRelevanceAnalyzer:
             raise ValueError("API_KEY environment variable is required")
         
         self.client = OpenAI(base_url=self.llm_base, api_key=self.api_key)
-        
+
+        cache_ttl = float(getattr(config, "LLM_CACHE_TTL", 300)) if config else 300.0
+        cache_size = int(getattr(config, "LLM_CACHE_MAX_SIZE", 1024)) if config else 1024
+        self._cache = LLMCache(max_size=cache_size, ttl_seconds=cache_ttl)
+        self._tl = threading.local()
+        bt.logging.info(f"[ANALYZER] LLM cache enabled: max_size={cache_size}, ttl={cache_ttl}s")
+
         # Initialize subnets
         if subnets:
             self.subnets = {s["id"]: s for s in subnets}
@@ -342,7 +350,8 @@ class SubnetRelevanceAnalyzer:
     
     def classify_post(self, text: str) -> Optional[PostClassification]:
         """
-        Classify using atomic tool calls for each dimension
+        Classify using atomic tool calls for each dimension.
+        Results are cached by text content (LLM calls use temperature=0).
         
         Args:
             text: X post text to classify
@@ -350,7 +359,13 @@ class SubnetRelevanceAnalyzer:
         Returns:
             PostClassification if successful, None if parsing fails
         """
+        cached = self._cache.get(text)
+        if cached is not None:
+            return cached
+
         try:
+            self._tl.had_llm_error = False
+
             # Step 1: Identify subnet (most critical decision)
             subnet_result = self._identify_subnet(text)
             
@@ -362,7 +377,7 @@ class SubnetRelevanceAnalyzer:
             impact = self._assess_impact(text)
             
             # Build final classification
-            return PostClassification(
+            result = PostClassification(
                 subnet_id=subnet_result['id'],
                 subnet_name=subnet_result['name'],
                 content_type=ContentType(content_type),
@@ -374,6 +389,9 @@ class SubnetRelevanceAnalyzer:
                 evidence_spans=subnet_result['evidence'],
                 anchors_detected=subnet_result['anchors']
             )
+            if not getattr(self._tl, 'had_llm_error', False):
+                self._cache.put(text, result)
+            return result
             
         except Exception as e:
             bt.logging.error(f"[ANALYZER] Classification error: {e}")
@@ -431,7 +449,9 @@ Pick the MOST SPECIFIC category that applies:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("content_type", "other")
-        except:
+        except Exception as e:
+            bt.logging.warning(f"[ANALYZER] _classify_content_type failed: {e}")
+            self._tl.had_llm_error = True
             return "other"
     
     def _classify_sentiment(self, text: str) -> str:
@@ -456,7 +476,9 @@ Choose the sentiment that best matches the tone:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("sentiment", "neutral")
-        except:
+        except Exception as e:
+            bt.logging.warning(f"[ANALYZER] _classify_sentiment failed: {e}")
+            self._tl.had_llm_error = True
             return "neutral"
     
     def _assess_technical_quality(self, text: str) -> str:
@@ -479,7 +501,9 @@ Choose the sentiment that best matches the tone:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("quality", "none")
-        except:
+        except Exception as e:
+            bt.logging.warning(f"[ANALYZER] _assess_technical_quality failed: {e}")
+            self._tl.had_llm_error = True
             return "none"
     
     def _classify_market_analysis(self, text: str) -> str:
@@ -503,7 +527,9 @@ Choose the sentiment that best matches the tone:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("analysis_type", "other")
-        except:
+        except Exception as e:
+            bt.logging.warning(f"[ANALYZER] _classify_market_analysis failed: {e}")
+            self._tl.had_llm_error = True
             return "other"
     
     def _assess_impact(self, text: str) -> str:
@@ -526,7 +552,9 @@ Choose the sentiment that best matches the tone:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("impact", "NONE")
-        except:
+        except Exception as e:
+            bt.logging.warning(f"[ANALYZER] _assess_impact failed: {e}")
+            self._tl.had_llm_error = True
             return "NONE"
     
     def analyze_post_complete(self, text: str) -> dict:

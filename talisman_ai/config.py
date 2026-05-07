@@ -96,6 +96,14 @@ MINER_SEND_TIMEOUT = float(os.getenv("MINER_SEND_TIMEOUT", "6.0"))
 VALIDATOR_MINER_QUERY_CONCURRENCY = int(os.getenv("VALIDATOR_MINER_QUERY_CONCURRENCY", "8"))
 VALIDATOR_MAX_PENDING_MINER_TASKS = int(os.getenv("VALIDATOR_MAX_PENDING_MINER_TASKS", "256"))
 
+# Validation thread pool: controls how many concurrent LLM-based validations run.
+# Lower values reduce LLM API pressure at the cost of slower validation throughput.
+VALIDATION_MAX_WORKERS = int(os.getenv("VALIDATION_MAX_WORKERS", "2"))
+
+# LLM result cache: avoids redundant API calls for identical post text.
+LLM_CACHE_TTL = float(os.getenv("LLM_CACHE_TTL", "300"))
+LLM_CACHE_MAX_SIZE = int(os.getenv("LLM_CACHE_MAX_SIZE", "1024"))
+
 # Tweet store configuration
 TWEET_STORE_LOCATION = os.getenv("TWEET_STORE_LOCATION", str(_SUBNET_ROOT / ".tweet_store.json"))
 TWEET_MAX_PROCESS_TIME = float(os.getenv("TWEET_MAX_PROCESS_TIME", "300.0"))  # 5 minutes default

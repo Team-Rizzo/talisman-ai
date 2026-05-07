@@ -14,6 +14,7 @@ import os
 import json
 import re
 import logging
+import threading
 from openai import OpenAI
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from difflib import SequenceMatcher
 from dotenv import load_dotenv
 
 from talisman_ai.analyzer.classifications import ContentType, Sentiment, TechnicalQuality, MarketAnalysis, ImpactPotential
+from talisman_ai.analyzer.llm_cache import LLMCache
 
 # Load environment variables
 load_dotenv()
@@ -232,7 +234,13 @@ class TelegramRelevanceAnalyzer:
             raise ValueError("API_KEY environment variable is required")
         
         self.client = OpenAI(base_url=self.llm_base, api_key=self.api_key)
-        
+
+        cache_ttl = float(os.getenv("LLM_CACHE_TTL", "300"))
+        cache_size = int(os.getenv("LLM_CACHE_MAX_SIZE", "1024"))
+        self._cache = LLMCache(max_size=cache_size, ttl_seconds=cache_ttl)
+        self._tl = threading.local()
+        logger.info(f"[TELEGRAM_ANALYZER] LLM cache enabled: max_size={cache_size}, ttl={cache_ttl}s")
+
         # Initialize subnets
         if subnets:
             self.subnets = {s["id"]: s for s in subnets}
@@ -448,7 +456,14 @@ class TelegramRelevanceAnalyzer:
             # Combine messages for analysis
             combined_text = self._combine_messages(normalized_messages)
             simple_text = self._combine_messages_simple(normalized_messages)
-            
+
+            cache_key = f"{simple_text}||sn={subnet_id}"
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            self._tl.had_llm_error = False
+
             # Step 1: Identify subnet - use provided subnet_id or detect from text
             if subnet_id is not None:
                 # Use provided subnet ID
@@ -493,7 +508,7 @@ class TelegramRelevanceAnalyzer:
                     contributing.append(msg.message_id)
             
             # Build final classification
-            return MessageGroupClassification(
+            result = MessageGroupClassification(
                 subnet_id=subnet_result['id'],
                 subnet_name=subnet_result['name'],
                 content_type=ContentType(content_type),
@@ -507,6 +522,9 @@ class TelegramRelevanceAnalyzer:
                 message_count=len(normalized_messages),
                 contributing_messages=contributing
             )
+            if not getattr(self._tl, 'had_llm_error', False):
+                self._cache.put(cache_key, result)
+            return result
             
         except Exception as e:
             logger.error(f"[TELEGRAM_ANALYZER] Classification error: {e}")
@@ -575,7 +593,9 @@ class TelegramRelevanceAnalyzer:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return Sentiment(args.get("sentiment", "neutral"))
-        except:
+        except Exception as e:
+            logger.warning(f"[TELEGRAM_ANALYZER] classify_last_message_sentiment failed: {e}")
+            self._tl.had_llm_error = True
             return None
     
     def _classify_content_type(self, text: str) -> str:
@@ -610,7 +630,9 @@ Pick the MOST SPECIFIC category that applies:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("content_type", "other")
-        except:
+        except Exception as e:
+            logger.warning(f"[TELEGRAM_ANALYZER] _classify_content_type failed: {e}")
+            self._tl.had_llm_error = True
             return "other"
     
     def _classify_sentiment(self, text: str) -> str:
@@ -635,7 +657,9 @@ Choose the sentiment that best matches the overall tone:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("sentiment", "neutral")
-        except:
+        except Exception as e:
+            logger.warning(f"[TELEGRAM_ANALYZER] _classify_sentiment failed: {e}")
+            self._tl.had_llm_error = True
             return "neutral"
     
     def _assess_technical_quality(self, text: str) -> str:
@@ -658,7 +682,9 @@ Choose the sentiment that best matches the overall tone:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("quality", "none")
-        except:
+        except Exception as e:
+            logger.warning(f"[TELEGRAM_ANALYZER] _assess_technical_quality failed: {e}")
+            self._tl.had_llm_error = True
             return "none"
     
     def _classify_market_analysis(self, text: str) -> str:
@@ -682,7 +708,9 @@ Choose the sentiment that best matches the overall tone:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("analysis_type", "other")
-        except:
+        except Exception as e:
+            logger.warning(f"[TELEGRAM_ANALYZER] _classify_market_analysis failed: {e}")
+            self._tl.had_llm_error = True
             return "other"
     
     def _assess_impact(self, text: str) -> str:
@@ -705,7 +733,9 @@ Choose the sentiment that best matches the overall tone:
             )
             args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
             return args.get("impact", "NONE")
-        except:
+        except Exception as e:
+            logger.warning(f"[TELEGRAM_ANALYZER] _assess_impact failed: {e}")
+            self._tl.had_llm_error = True
             return "NONE"
     
     def analyze_message_group_complete(self, messages: List, subnet_id: Optional[int] = None) -> dict:
