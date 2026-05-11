@@ -1,5 +1,5 @@
 """
-Deterministic X Post Classification for BitTensor Subnet Relevance
+Deterministic X Post Classification for Crypto Asset Relevance
 
 Uses atomic tool calls for each classification dimension to achieve deterministic
 LLM evaluation. Validators can verify miner classifications via exact matching
@@ -7,9 +7,9 @@ of canonical strings.
 
 Key Features:
 - Atomic decisions: One tool call per classification dimension
-- Hierarchical trigger rules (SN mention > alias > name+anchor > NONE)
-- Explicit abstain logic (subnet_id=0 for ties/unknown)
-- Evidence extraction (exact spans + anchors for auditability)
+- Keyword-based asset identification (cashtags, names, aliases)
+- Explicit abstain logic (asset_id=0 for ties/unknown)
+- Evidence extraction (exact spans for auditability)
 """
 
 from openai import OpenAI
@@ -21,8 +21,6 @@ from dataclasses import dataclass
 import time
 from datetime import datetime
 import bittensor as bt
-from difflib import SequenceMatcher
-
 from .classifications import ContentType, Sentiment, TechnicalQuality, MarketAnalysis, ImpactPotential
 from .llm_cache import LLMCache
 
@@ -36,8 +34,8 @@ except ImportError:
 @dataclass
 class PostClassification:
     """Canonical classification result"""
-    subnet_id: int
-    subnet_name: str
+    asset_id: int
+    asset_symbol: str
     content_type: ContentType
     sentiment: Sentiment
     technical_quality: TechnicalQuality
@@ -45,19 +43,17 @@ class PostClassification:
     impact_potential: ImpactPotential
     relevance_confidence: str  # "high", "medium", "low"
     evidence_spans: List[str]  # Exact substrings that triggered the decision
-    anchors_detected: List[str]  # BitTensor anchor words found
     
     def to_canonical_string(self) -> str:
         """Deterministic string for exact matching by validators"""
         sorted_evidence = "|".join(sorted([s.lower() for s in self.evidence_spans]))
-        sorted_anchors = "|".join(sorted([s.lower() for s in self.anchors_detected]))
-        return f"{self.subnet_id}|{self.content_type.value}|{self.sentiment.value}|{self.technical_quality.value}|{self.market_analysis.value}|{self.impact_potential.value}|{self.relevance_confidence}|{sorted_evidence}|{sorted_anchors}"
+        return f"{self.asset_id}|{self.content_type.value}|{self.sentiment.value}|{self.technical_quality.value}|{self.market_analysis.value}|{self.impact_potential.value}|{self.relevance_confidence}|{sorted_evidence}"
     
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization or database storage"""
         return {
-            "subnet_id": self.subnet_id,
-            "subnet_name": self.subnet_name,
+            "asset_id": self.asset_id,
+            "asset_symbol": self.asset_symbol,
             "content_type": self.content_type.value,
             "sentiment": self.sentiment.value,
             "technical_quality": self.technical_quality.value,
@@ -65,31 +61,23 @@ class PostClassification:
             "impact_potential": self.impact_potential.value,
             "relevance_confidence": self.relevance_confidence,
             "evidence_spans": self.evidence_spans,
-            "anchors_detected": self.anchors_detected,
         }
-    
-    def get_tokens_dict(self) -> dict:
-        """Get subnet tokens dict for grader compatibility"""
-        if self.subnet_id == 0:
-            return {}
-        return {self.subnet_name: 1.0}
 
 
 # Atomic tool definitions - one per classification dimension
-SUBNET_ID_TOOL = {
+ASSET_ID_TOOL = {
     "type": "function",
     "function": {
-        "name": "identify_subnet",
-        "description": "Identify which subnet this post is about",
+        "name": "identify_asset",
+        "description": "Identify which crypto asset this post is about",
         "parameters": {
             "type": "object",
             "properties": {
-                "subnet_id": {"type": "integer", "description": "Subnet ID (0 if none/unclear)"},
+                "asset_id": {"type": "integer", "description": "Asset ID (0 if none/unclear)"},
                 "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-                "evidence_spans": {"type": "array", "items": {"type": "string"}, "description": "Exact text spans that identify this subnet"},
-                "anchors_detected": {"type": "array", "items": {"type": "string"}, "description": "BitTensor anchor words found"}
+                "evidence_spans": {"type": "array", "items": {"type": "string"}, "description": "Exact text spans that identify this asset"},
             },
-            "required": ["subnet_id", "confidence", "evidence_spans", "anchors_detected"]
+            "required": ["asset_id", "confidence", "evidence_spans"]
         }
     }
 }
@@ -190,19 +178,18 @@ IMPACT_TOOL = {
 }
 
 
-class SubnetRelevanceAnalyzer:
+class AssetRelevanceAnalyzer:
     """
-    Deterministic X post classifier using atomic tool calls
+    Deterministic X post classifier using atomic tool calls.
     
     Each classification dimension is decided independently via its own tool call,
     eliminating compound decision variance.
     """
     
-    def __init__(self, model: str = None, api_key: str = None, llm_base: str = None, subnets: List[Dict] = None):
-        """Initialize analyzer with subnet registry and LLM config"""
-        self.subnet_registry = {}
+    def __init__(self, model: str = None, api_key: str = None, llm_base: str = None, assets: List[Dict] = None):
+        """Initialize analyzer with asset registry and LLM config"""
+        self.asset_registry = {}
         
-        # Use provided values or fall back to centralized config
         if config:
             self.model = model or config.MODEL
             self.api_key = api_key or config.API_KEY
@@ -223,129 +210,112 @@ class SubnetRelevanceAnalyzer:
         self._tl = threading.local()
         bt.logging.info(f"[ANALYZER] LLM cache enabled: max_size={cache_size}, ttl={cache_ttl}s")
 
-        # Initialize subnets
-        if subnets:
-            self.subnets = {s["id"]: s for s in subnets}
-            for s in subnets:
-                self.subnet_registry[s["id"]] = s
+        if assets:
+            self.assets = {a["id"]: a for a in assets}
+            for a in assets:
+                self.asset_registry[a["id"]] = a
         else:
-            self.subnets = {}
+            self.assets = {}
         
-        # Add NONE subnet
-        self.subnets[0] = {
+        self.assets[0] = {
             "id": 0,
+            "symbol": "NONE",
             "name": "NONE_OF_THE_ABOVE",
-            "description": "General BitTensor content not specific to a listed subnet"
+            "description": "Content not specific to a listed crypto asset"
         }
         
         bt.logging.info(f"[ANALYZER] Initialized with model: {self.model}")
-        if subnets:
-            bt.logging.info(f"[ANALYZER] Registered {len(self.subnets)-1} subnets (+1 NONE)")
+        if assets:
+            bt.logging.info(f"[ANALYZER] Registered {len(self.assets)-1} assets (+1 NONE)")
     
-    def register_subnet(self, subnet_data: dict):
-        """Register a subnet (backward compatibility)"""
-        subnet_id = subnet_data['id']
-        self.subnet_registry[subnet_id] = subnet_data
-        self.subnets[subnet_id] = subnet_data
-        bt.logging.debug(f"[ANALYZER] Registered subnet {subnet_id}: {subnet_data.get('name')}")
+    def register_asset(self, asset_data: dict):
+        """Register a crypto asset"""
+        asset_id = asset_data['id']
+        self.asset_registry[asset_id] = asset_data
+        self.assets[asset_id] = asset_data
+        bt.logging.debug(f"[ANALYZER] Registered asset {asset_id}: {asset_data.get('symbol')}")
     
     def classify_keyword_based(self, text: str) -> Dict:
         """
-        Keyword-based subnet classification using edit distance for fuzzy matching.
+        Keyword-based asset classification using cashtags and identifier matching.
+        
+        Matching priority:
+        1. Cashtag match ($BTC, $ETH, etc.) — highest confidence
+        2. Exact word-boundary match on unique_identifiers
+        3. No match → asset_id 0
         
         Args:
             text: Post text to classify
             
         Returns:
             Dict with:
-            - is_bittensor: Whether post is BitTensor-related
-            - confidence: 'high' (anchor present) or 'low' (subnet name only, possible false positive)
-            - subnet_scores: {subnet_id: score}
-            - matched_subnets: [(subnet_id, name, score, evidence), ...] sorted by score
+            - is_relevant: Whether post matches a tracked crypto asset
+            - confidence: 'high' or 'medium'
+            - asset_scores: {asset_id: score}
+            - matched_assets: [(asset_id, symbol, score, evidence), ...] sorted by score
         """
         text_lower = text.lower()
         
-        # Check for explicit BitTensor anchors
-        has_anchor = bool(re.search(r'\bsn\d+\b|\bsubnet\b|\bbittensor\b|\btao\b|\$tao\b|\bopentensor\b', text_lower))
-        
-        # Extract words for matching (4+ chars, exclude ecosystem terms)
-        ecosystem = re.compile(r'^(bittensor|opentensor|tao|subnets?|sn\d+)$')
-        words = {w for w in re.findall(r'\b\w{4,}\b', text_lower) if not ecosystem.match(w)}
-        
-        # Find subnet matches
         matches = []
-        for sid, data in self.subnets.items():
-            if sid == 0:
+        for aid, data in self.assets.items():
+            if aid == 0:
                 continue
             
-            # SN pattern match (e.g., SN23, subnet 23) - (?!\d) prevents SN23 matching SN123
-            if re.search(rf'\bsn\s*{sid}(?!\d)|\bsubnet\s+{sid}(?!\d)', text_lower):
-                matches.append((sid, data['name'], 1.0, [f'SN{sid}']))
+            symbol = data.get('symbol', '')
+            evidence = []
+            
+            # Cashtag match (highest priority) — e.g. $BTC, $ETH
+            for tag in data.get('cashtags', []):
+                if tag.lower() in text_lower:
+                    evidence.append(tag)
+            
+            if evidence:
+                matches.append((aid, symbol, 1.0, evidence))
                 continue
             
-            # Check name and identifiers
-            best = (0.0, [])
-            for name in [data.get('name', '')] + data.get('unique_identifiers', []):
-                if not name or len(name) < 4 or ecosystem.match(name.lower()):
+            # Case-sensitive identifiers (e.g., "SOL" must be uppercase)
+            for identifier in data.get('case_sensitive_identifiers', []):
+                if len(identifier) < 3:
                     continue
-                name_lower = name.lower()
-                
-                # Exact match
-                if name_lower in words:
-                    best = (0.9, [name])
-                    break
-                
-                # Fuzzy match (edit distance >= 0.85)
-                for word in words:
-                    sim = SequenceMatcher(None, word, name_lower).ratio()
-                    if sim >= 0.85 and sim > best[0]:
-                        best = (sim * 0.9, [f'{word}≈{name}'])
+                if re.search(rf'\b{re.escape(identifier)}\b', text):
+                    evidence.append(identifier)
             
-            if best[0] >= 0.75:
-                matches.append((sid, data['name'], best[0], best[1]))
+            # Case-insensitive word-boundary match on unique_identifiers
+            for identifier in data.get('unique_identifiers', []):
+                id_lower = identifier.lower()
+                if len(id_lower) < 3:
+                    continue
+                if re.search(rf'\b{re.escape(id_lower)}\b', text_lower):
+                    evidence.append(identifier)
+            
+            if evidence:
+                confidence_score = 0.9 if len(evidence) > 1 else 0.8
+                matches.append((aid, symbol, confidence_score, evidence))
         
-        # Sort by score descending
         matches.sort(key=lambda x: x[2], reverse=True)
         
-        # Determine result
-        if not has_anchor and not matches:
-            return {'is_bittensor': False, 'confidence': None, 'subnet_scores': {}, 'matched_subnets': []}
+        if not matches:
+            return {'is_relevant': False, 'confidence': None, 'asset_scores': {}, 'matched_assets': []}
         
         return {
-            'is_bittensor': True,
-            'confidence': 'high' if has_anchor else 'low',
-            'subnet_scores': {m[0]: m[2] for m in matches},
-            'matched_subnets': matches
+            'is_relevant': True,
+            'confidence': 'high' if matches[0][2] >= 0.9 else 'medium',
+            'asset_scores': {m[0]: m[2] for m in matches},
+            'matched_assets': matches
         }
     
-    def _build_subnet_context(self) -> str:
-        """Build rich semantic context for subnet identification"""
+    def _build_asset_context(self) -> str:
+        """Build context string for asset identification (used in LLM prompts if needed)"""
         contexts = []
-        for sid in sorted(self.subnets.keys()):
-            if sid == 0:
+        for aid in sorted(self.assets.keys()):
+            if aid == 0:
                 continue
-            s = self.subnets[sid]
-            
-            # Build comprehensive description (no truncation - let LLM handle it)
-            ctx = f"SN{sid} ({s.get('name', 'Unknown')}): {s.get('description', '')}"
-            
-            # Add primary functions if available
-            functions = s.get('primary_functions', [])
-            if functions:
-                ctx += f" | Functions: {', '.join(functions[:4])}"
-            
-            # Add all identifiers (not just first 3)
-            ids = s.get('unique_identifiers', [])
+            a = self.assets[aid]
+            ctx = f"{a.get('symbol', '?')} (id={aid}, {a.get('name', 'Unknown')}): {a.get('description', '')}"
+            ids = a.get('unique_identifiers', [])
             if ids:
                 ctx += f" | IDs: {', '.join(ids)}"
-            
-            # Add distinguishing features if available
-            features = s.get('distinguishing_features', [])
-            if features:
-                ctx += f" | Features: {', '.join(features[:3])}"
-            
             contexts.append(ctx)
-        
         return '\n'.join(contexts)
     
     def classify_post(self, text: str) -> Optional[PostClassification]:
@@ -366,28 +336,24 @@ class SubnetRelevanceAnalyzer:
         try:
             self._tl.had_llm_error = False
 
-            # Step 1: Identify subnet (most critical decision)
-            subnet_result = self._identify_subnet(text)
+            asset_result = self._identify_asset(text)
             
-            # Step 2-6: Classify other dimensions atomically
             content_type = self._classify_content_type(text)
             sentiment = self._classify_sentiment(text)
             technical_quality = self._assess_technical_quality(text)
             market_analysis = self._classify_market_analysis(text)
             impact = self._assess_impact(text)
             
-            # Build final classification
             result = PostClassification(
-                subnet_id=subnet_result['id'],
-                subnet_name=subnet_result['name'],
+                asset_id=asset_result['id'],
+                asset_symbol=asset_result['symbol'],
                 content_type=ContentType(content_type),
                 sentiment=Sentiment(sentiment),
                 technical_quality=TechnicalQuality(technical_quality),
                 market_analysis=MarketAnalysis(market_analysis),
                 impact_potential=ImpactPotential(impact),
-                relevance_confidence=subnet_result['confidence'],
-                evidence_spans=subnet_result['evidence'],
-                anchors_detected=subnet_result['anchors']
+                relevance_confidence=asset_result['confidence'],
+                evidence_spans=asset_result['evidence'],
             )
             if not getattr(self._tl, 'had_llm_error', False):
                 self._cache.put(text, result)
@@ -397,25 +363,24 @@ class SubnetRelevanceAnalyzer:
             bt.logging.error(f"[ANALYZER] Classification error: {e}")
             return None
     
-    def _identify_subnet(self, text: str) -> dict:
-        """Identify subnet using keyword-based matching (no LLM)."""
+    def _identify_asset(self, text: str) -> dict:
+        """Identify crypto asset using keyword-based matching (no LLM)."""
         result = self.classify_keyword_based(text)
         
-        if not result['is_bittensor']:
-            return {'id': 0, 'name': "NONE_OF_THE_ABOVE", 'confidence': "low", 'evidence': [], 'anchors': []}
+        if not result['is_relevant']:
+            return {'id': 0, 'symbol': "NONE", 'confidence': "low", 'evidence': []}
         
-        if result['matched_subnets']:
-            top = result['matched_subnets'][0]  # (sid, name, score, evidence)
+        if result['matched_assets']:
+            top = result['matched_assets'][0]  # (aid, symbol, score, evidence)
             confidence = 'high' if top[2] >= 0.9 else 'medium' if top[2] >= 0.8 else 'low'
             return {
                 'id': top[0],
-                'name': top[1],
+                'symbol': top[1],
                 'confidence': confidence,
                 'evidence': top[3],
-                'anchors': []
             }
         
-        return {'id': 0, 'name': "NONE_OF_THE_ABOVE", 'confidence': "low", 'evidence': [], 'anchors': []}
+        return {'id': 0, 'symbol': "NONE", 'confidence': "low", 'evidence': []}
     
     def _classify_content_type(self, text: str) -> str:
         """Atomic decision: Content type"""
@@ -559,31 +524,27 @@ Choose the sentiment that best matches the tone:
     
     def analyze_post_complete(self, text: str) -> dict:
         """
-        Analyze post and return rich classification data
-        
-        Maintains backward compatibility with existing interface.
+        Analyze post and return rich classification data.
         """
         start_time = time.time()
         bt.logging.info(f"[ANALYZER] Starting analysis for post (length: {len(text)} chars)")
         
-        # Run atomic classification
         classification = self.classify_post(text)
         
         if classification is None:
             bt.logging.warning(f"[ANALYZER] Classification failed")
             return {
                 "classification": None,
-                "subnet_relevance": {},
+                "asset_relevance": {},
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Build subnet_relevance dict
-        subnet_relevance = {}
-        if classification.subnet_id != 0:
-            subnet_name = classification.subnet_name
-            subnet_relevance[subnet_name] = {
-                "subnet_id": classification.subnet_id,
-                "subnet_name": subnet_name,
+        asset_relevance = {}
+        if classification.asset_id != 0:
+            symbol = classification.asset_symbol
+            asset_relevance[symbol] = {
+                "asset_id": classification.asset_id,
+                "asset_symbol": symbol,
                 "relevance": 1.0,
                 "relevance_confidence": classification.relevance_confidence,
                 "content_type": classification.content_type.value,
@@ -592,13 +553,11 @@ Choose the sentiment that best matches the tone:
                 "market_analysis": classification.market_analysis.value,
                 "impact_potential": classification.impact_potential.value,
                 "evidence_spans": classification.evidence_spans,
-                "anchors_detected": classification.anchors_detected,
             }
         
         total_time = time.time() - start_time
         bt.logging.info(f"[ANALYZER] Analysis completed in {total_time:.2f}s")
         
-        # Sentiment mapping for backward compatibility
         sentiment_to_float = {
             "very_bullish": 1.0,
             "bullish": 0.5,
@@ -611,23 +570,23 @@ Choose the sentiment that best matches the tone:
         
         return {
             "classification": classification,
-            "subnet_relevance": subnet_relevance,
+            "asset_relevance": asset_relevance,
             "sentiment": sentiment_float,
             "sentiment_enum": sentiment_enum,
             "timestamp": datetime.now().isoformat()
         }
     
     def _parse_classification(self, args: dict) -> Optional[PostClassification]:
-        """Parse and validate function call arguments (backward compatibility)"""
+        """Parse and validate function call arguments"""
         try:
-            subnet_id = int(args["subnet_id"])
-            if subnet_id not in self.subnets:
-                bt.logging.warning(f"[ANALYZER] Unknown subnet_id: {subnet_id}")
+            asset_id = int(args["asset_id"])
+            if asset_id not in self.assets:
+                bt.logging.warning(f"[ANALYZER] Unknown asset_id: {asset_id}")
                 return None
             
             return PostClassification(
-                subnet_id=subnet_id,
-                subnet_name=self.subnets[subnet_id]["name"],
+                asset_id=asset_id,
+                asset_symbol=self.assets[asset_id].get("symbol", "NONE"),
                 content_type=ContentType(args["content_type"]),
                 sentiment=Sentiment(args["sentiment"]),
                 technical_quality=TechnicalQuality(args["technical_quality"]),
@@ -635,8 +594,11 @@ Choose the sentiment that best matches the tone:
                 impact_potential=ImpactPotential(args["impact_potential"]),
                 relevance_confidence=args["relevance_confidence"],
                 evidence_spans=args.get("evidence_spans", []),
-                anchors_detected=args.get("anchors_detected", [])
             )
         except (ValueError, KeyError) as e:
             bt.logging.error(f"[ANALYZER] Parse error: {e}")
             return None
+
+
+# Backward-compatible alias for existing imports
+SubnetRelevanceAnalyzer = AssetRelevanceAnalyzer

@@ -585,8 +585,8 @@ class Validator(BaseValidatorNeuron):
                 CompletedTweetSubmission(
                     tweet_id=tweet.id,
                     sentiment=tweet.analysis.sentiment or "neutral",
-                    subnet_id=tweet.analysis.subnet_id,
-                    subnet_name=tweet.analysis.subnet_name,
+                    asset_id=tweet.analysis.asset_id,
+                    asset_symbol=tweet.analysis.asset_symbol,
                     content_type=tweet.analysis.content_type,
                     technical_quality=tweet.analysis.technical_quality,
                     market_analysis=tweet.analysis.market_analysis,
@@ -612,8 +612,8 @@ class Validator(BaseValidatorNeuron):
                 CompletedTelegramMessageSubmission(
                     message_id=msg.id,
                     sentiment=msg.analysis.sentiment or "neutral",
-                    subnet_id=msg.analysis.subnet_id,
-                    subnet_name=msg.analysis.subnet_name,
+                    asset_id=msg.analysis.asset_id,
+                    asset_symbol=msg.analysis.asset_symbol,
                     content_type=msg.analysis.content_type,
                     technical_quality=msg.analysis.technical_quality,
                     market_analysis=msg.analysis.market_analysis,

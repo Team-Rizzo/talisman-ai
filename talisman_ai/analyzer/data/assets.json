@@ -1,0 +1,86 @@
+[
+  {
+    "id": 1,
+    "symbol": "BTC",
+    "name": "Bitcoin",
+    "description": "Bitcoin is the first and largest cryptocurrency by market capitalization, serving as a decentralized digital store of value and peer-to-peer payment network.",
+    "unique_identifiers": [
+      "bitcoin",
+      "btc",
+      "$btc",
+      "satoshi",
+      "lightning network"
+    ],
+    "cashtags": ["$BTC"],
+    "distinguishing_features": [
+      "Proof of work consensus",
+      "21 million supply cap",
+      "Digital gold narrative",
+      "Lightning Network for payments"
+    ]
+  },
+  {
+    "id": 2,
+    "symbol": "ETH",
+    "name": "Ethereum",
+    "description": "Ethereum is a decentralized blockchain platform that enables smart contracts and decentralized applications (dApps), and is the second-largest cryptocurrency by market capitalization.",
+    "unique_identifiers": [
+      "ethereum",
+      "eth",
+      "$eth",
+      "vitalik",
+      "solidity",
+      "erc-20",
+      "erc20",
+      "erc-721",
+      "erc721"
+    ],
+    "cashtags": ["$ETH"],
+    "distinguishing_features": [
+      "Smart contract platform",
+      "Proof of stake consensus",
+      "EVM ecosystem",
+      "DeFi and NFT infrastructure"
+    ]
+  },
+  {
+    "id": 3,
+    "symbol": "SOL",
+    "name": "Solana",
+    "description": "Solana is a high-performance blockchain platform designed for decentralized applications, known for fast transaction speeds and low fees.",
+    "unique_identifiers": [
+      "solana"
+    ],
+    "case_sensitive_identifiers": [
+      "SOL"
+    ],
+    "cashtags": ["$SOL"],
+    "distinguishing_features": [
+      "Proof of history consensus",
+      "High throughput and low fees",
+      "Growing DeFi and NFT ecosystem",
+      "Parallel transaction processing"
+    ]
+  },
+  {
+    "id": 4,
+    "symbol": "TAO",
+    "name": "Bittensor",
+    "description": "Bittensor (TAO) is a decentralized machine learning network that incentivizes AI model training and inference through a blockchain-based reward system.",
+    "unique_identifiers": [
+      "bittensor",
+      "tao",
+      "$tao",
+      "opentensor",
+      "dtao",
+      "bittensor subnet"
+    ],
+    "cashtags": ["$TAO"],
+    "distinguishing_features": [
+      "Decentralized AI network",
+      "Subnet architecture for specialized tasks",
+      "Incentivized machine learning",
+      "Yuma consensus mechanism"
+    ]
+  }
+]

@@ -66,8 +66,8 @@ class Account(AccountBase):
 class TweetAnalysisBase(BaseModel):
     """Base tweet analysis model."""
     sentiment: Optional[str] = None  # very_bullish, bullish, neutral, bearish, very_bearish
-    subnet_id: Optional[int] = Field(None, alias="subnetId")
-    subnet_name: Optional[str] = Field(None, alias="subnetName")
+    asset_id: Optional[int] = Field(None, alias="assetId")
+    asset_symbol: Optional[str] = Field(None, alias="assetSymbol")
     content_type: Optional[str] = Field(None, alias="contentType")
     technical_quality: Optional[str] = Field(None, alias="technicalQuality")
     market_analysis: Optional[str] = Field(None, alias="marketAnalysis")
@@ -75,8 +75,6 @@ class TweetAnalysisBase(BaseModel):
     
     class Config:
         populate_by_name = True
-        # Allow API-side analysis objects (which include id/tweetId/analyzedAt) to be
-        # accepted where we only need the base classification fields.
         extra = "allow"
 
 
@@ -84,8 +82,8 @@ class TweetAnalysisCreate(BaseModel):
     """Model for creating tweet analysis."""
     tweet_id: int
     sentiment: Optional[str] = None
-    subnet_id: Optional[int] = None
-    subnet_name: Optional[str] = None
+    asset_id: Optional[int] = None
+    asset_symbol: Optional[str] = None
     content_type: Optional[str] = None
     analysis_data: Optional[dict] = None
 
@@ -323,9 +321,8 @@ class CompletedTweetSubmission(BaseModel):
     """Model for submitting a completed scored tweet."""
     tweet_id: int
     sentiment: str
-    # Optional richer classification fields (backward compatible with sentiment-only submissions)
-    subnet_id: Optional[int] = None
-    subnet_name: Optional[str] = None
+    asset_id: Optional[int] = None
+    asset_symbol: Optional[str] = None
     content_type: Optional[str] = None
     technical_quality: Optional[str] = None
     market_analysis: Optional[str] = None
@@ -386,8 +383,8 @@ class TelegramMessageAnalysis(BaseModel):
     id: int
     message_id: str = Field(alias="messageId")
     sentiment: Optional[str] = None
-    subnet_id: Optional[int] = Field(None, alias="subnetId")
-    subnet_name: Optional[str] = Field(None, alias="subnetName")
+    asset_id: Optional[int] = Field(None, alias="assetId")
+    asset_symbol: Optional[str] = Field(None, alias="assetSymbol")
     content_type: Optional[str] = Field(None, alias="contentType")
     technical_quality: Optional[str] = Field(None, alias="technicalQuality")
     market_analysis: Optional[str] = Field(None, alias="marketAnalysis")
@@ -432,8 +429,8 @@ class TelegramMessageForScoring(TelegramMessageWithContext):
     context_messages: List["TelegramMessageWithContext"] = Field(
         default_factory=list, alias="contextMessages"
     )
-    inherited_subnet_id: Optional[int] = Field(None, alias="inheritedSubnetId")
-    inherited_subnet_name: Optional[str] = Field(None, alias="inheritedSubnetName")
+    inherited_asset_id: Optional[int] = Field(None, alias="inheritedAssetId")
+    inherited_asset_symbol: Optional[str] = Field(None, alias="inheritedAssetSymbol")
 
     class Config:
         populate_by_name = True
@@ -449,8 +446,8 @@ class CompletedTelegramMessageSubmission(BaseModel):
     """Model for submitting a completed scored telegram message."""
     message_id: str
     sentiment: str
-    subnet_id: Optional[int] = None
-    subnet_name: Optional[str] = None
+    asset_id: Optional[int] = None
+    asset_symbol: Optional[str] = None
     content_type: Optional[str] = None
     technical_quality: Optional[str] = None
     market_analysis: Optional[str] = None

@@ -551,7 +551,7 @@ class TalismanAPIClient:
         Each message includes context:
         - If the message is a reply, the parent message is included with its classification
         - If not a reply, the previous 2 messages in the same group are included
-        - inherited_subnet_id/inherited_subnet_name are set if context has classification
+        - inherited_asset_id/inherited_asset_symbol are set if context has classification
         
         Args:
             limit: Maximum number of messages to return (default: 3)
@@ -612,7 +612,7 @@ class TalismanAPIClient:
             
         Example:
             await client.submit_completed_telegram_messages([
-                {"message_id": "abc123", "sentiment": "bullish", "subnet_id": 18},
+                {"message_id": "abc123", "sentiment": "bullish", "asset_id": 4},
                 {"message_id": "def456", "sentiment": "bearish"},
             ])
         """
@@ -626,10 +626,10 @@ class TalismanAPIClient:
                     "sentiment": item.sentiment,
                 }
                 # Add optional fields if present
-                if item.subnet_id is not None:
-                    submission["subnet_id"] = item.subnet_id
-                if item.subnet_name is not None:
-                    submission["subnet_name"] = item.subnet_name
+                if item.asset_id is not None:
+                    submission["asset_id"] = item.asset_id
+                if item.asset_symbol is not None:
+                    submission["asset_symbol"] = item.asset_symbol
                 if item.content_type is not None:
                     submission["content_type"] = item.content_type
                 if item.technical_quality is not None:

@@ -188,11 +188,10 @@ class Miner(BaseMinerNeuron):
                     bt.logging.warning(f"[Miner] Failed to classify tweet {tweet.id}")
                     continue
                 
-                # Create analysis object with required fields for validator
                 tweet.analysis = TweetAnalysisBase(
                     sentiment=classification.sentiment.value,
-                    subnet_id=classification.subnet_id,
-                    subnet_name=classification.subnet_name,
+                    asset_id=classification.asset_id,
+                    asset_symbol=classification.asset_symbol,
                     content_type=classification.content_type.value,
                     technical_quality=classification.technical_quality.value,
                     market_analysis=classification.market_analysis.value,
@@ -285,27 +284,24 @@ class Miner(BaseMinerNeuron):
                             'content': ctx.content,
                         })
                 
-                # Use inherited subnet_id if provided (don't reclassify)
-                inherited_subnet_id = msg.inherited_subnet_id
+                inherited_asset_id = msg.inherited_asset_id
                 
-                # Classify the message group
                 classification = self.telegram_analyzer.classify_message_group(
                     messages_for_analysis, 
-                    subnet_id=inherited_subnet_id
+                    asset_id=inherited_asset_id
                 )
                 
                 if classification is None:
                     bt.logging.warning(f"[Miner] Failed to classify telegram message {msg.id}")
                     continue
                 
-                # Create analysis object with required fields for validator
                 from datetime import datetime
                 msg.analysis = TelegramMessageAnalysis(
-                    id=0,  # Placeholder, will be assigned by API
+                    id=0,
                     message_id=msg.id,
                     sentiment=classification.sentiment.value,
-                    subnet_id=classification.subnet_id,
-                    subnet_name=classification.subnet_name,
+                    asset_id=classification.asset_id,
+                    asset_symbol=classification.asset_symbol,
                     content_type=classification.content_type.value,
                     technical_quality=classification.technical_quality.value,
                     market_analysis=classification.market_analysis.value,

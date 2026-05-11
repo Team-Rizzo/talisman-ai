@@ -1,12 +1,12 @@
 """
-Telegram Message Group Classification for BitTensor Subnet Relevance
+Telegram Message Group Classification for Crypto Asset Relevance
 
-Analyzes groups of Telegram messages to determine subnet relevance.
-Identifies subnets from patterns like: SN45, 45, SN 45, subnet 45
+Analyzes groups of Telegram messages to determine asset relevance.
+Uses keyword-based matching (cashtags, asset names, aliases).
 
 Key Features:
 - Group analysis: Process multiple messages as a conversation
-- Flexible subnet detection: Various pattern formats supported
+- Keyword-based asset detection (cashtags, names, identifiers)
 - Evidence aggregation across message groups
 """
 
@@ -16,10 +16,9 @@ import re
 import logging
 import threading
 from openai import OpenAI
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
-from difflib import SequenceMatcher
 from dotenv import load_dotenv
 
 from talisman_ai.analyzer.classifications import ContentType, Sentiment, TechnicalQuality, MarketAnalysis, ImpactPotential
@@ -45,8 +44,8 @@ class TelegramMessage:
 @dataclass
 class MessageGroupClassification:
     """Classification result for a group of Telegram messages"""
-    subnet_id: int
-    subnet_name: str
+    asset_id: int
+    asset_symbol: str
     content_type: ContentType
     sentiment: Sentiment
     technical_quality: TechnicalQuality
@@ -54,21 +53,19 @@ class MessageGroupClassification:
     impact_potential: ImpactPotential
     relevance_confidence: str  # "high", "medium", "low"
     evidence_spans: List[str]  # Exact substrings that triggered the decision
-    anchors_detected: List[str]  # BitTensor anchor words found
     message_count: int  # Number of messages in the group
-    contributing_messages: List[str] = field(default_factory=list)  # message_ids that contributed to classification
+    contributing_messages: List[str] = field(default_factory=list)
     
     def to_canonical_string(self) -> str:
         """Deterministic string for exact matching by validators"""
         sorted_evidence = "|".join(sorted([s.lower() for s in self.evidence_spans]))
-        sorted_anchors = "|".join(sorted([s.lower() for s in self.anchors_detected]))
-        return f"{self.subnet_id}|{self.content_type.value}|{self.sentiment.value}|{self.technical_quality.value}|{self.market_analysis.value}|{self.impact_potential.value}|{self.relevance_confidence}|{sorted_evidence}|{sorted_anchors}"
+        return f"{self.asset_id}|{self.content_type.value}|{self.sentiment.value}|{self.technical_quality.value}|{self.market_analysis.value}|{self.impact_potential.value}|{self.relevance_confidence}|{sorted_evidence}"
     
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization or database storage"""
         return {
-            "subnet_id": self.subnet_id,
-            "subnet_name": self.subnet_name,
+            "asset_id": self.asset_id,
+            "asset_symbol": self.asset_symbol,
             "content_type": self.content_type.value,
             "sentiment": self.sentiment.value,
             "technical_quality": self.technical_quality.value,
@@ -76,33 +73,25 @@ class MessageGroupClassification:
             "impact_potential": self.impact_potential.value,
             "relevance_confidence": self.relevance_confidence,
             "evidence_spans": self.evidence_spans,
-            "anchors_detected": self.anchors_detected,
             "message_count": self.message_count,
             "contributing_messages": self.contributing_messages,
         }
-    
-    def get_tokens_dict(self) -> dict:
-        """Get subnet tokens dict for grader compatibility"""
-        if self.subnet_id == 0:
-            return {}
-        return {self.subnet_name: 1.0}
 
 
 # Atomic tool definitions - one per classification dimension
-SUBNET_ID_TOOL = {
+ASSET_ID_TOOL = {
     "type": "function",
     "function": {
-        "name": "identify_subnet",
-        "description": "Identify which subnet this message group is about",
+        "name": "identify_asset",
+        "description": "Identify which crypto asset this message group is about",
         "parameters": {
             "type": "object",
             "properties": {
-                "subnet_id": {"type": "integer", "description": "Subnet ID (0 if none/unclear)"},
+                "asset_id": {"type": "integer", "description": "Asset ID (0 if none/unclear)"},
                 "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-                "evidence_spans": {"type": "array", "items": {"type": "string"}, "description": "Exact text spans that identify this subnet"},
-                "anchors_detected": {"type": "array", "items": {"type": "string"}, "description": "BitTensor anchor words found"}
+                "evidence_spans": {"type": "array", "items": {"type": "string"}, "description": "Exact text spans that identify this asset"},
             },
-            "required": ["subnet_id", "confidence", "evidence_spans", "anchors_detected"]
+            "required": ["asset_id", "confidence", "evidence_spans"]
         }
     }
 }
@@ -203,29 +192,18 @@ IMPACT_TOOL = {
 }
 
 
-# Subnet identification patterns
-# Matches: SN45, SN 45, sn45, sn 45, subnet 45, subnet45, Subnet 45, 45 (standalone number)
-SUBNET_PATTERNS = [
-    (r'\bSN\s*(\d{1,3})\b', 'sn_format'),           # SN45, SN 45
-    (r'\bsn\s*(\d{1,3})\b', 'sn_format'),           # sn45, sn 45
-    (r'\bsubnet\s*(\d{1,3})\b', 'subnet_format'),   # subnet 45, subnet45
-    (r'\bSubnet\s*(\d{1,3})\b', 'subnet_format'),   # Subnet 45
-]
-
-
 class TelegramRelevanceAnalyzer:
     """
-    Telegram message group classifier using atomic tool calls
+    Telegram message group classifier using atomic tool calls.
     
-    Analyzes groups of messages to identify subnet relevance and
+    Analyzes groups of messages to identify crypto asset relevance and
     classify content type, sentiment, and other dimensions.
     """
     
-    def __init__(self, model: str = None, api_key: str = None, llm_base: str = None, subnets: List[Dict] = None):
-        """Initialize analyzer with subnet registry and LLM config"""
-        self.subnet_registry = {}
+    def __init__(self, model: str = None, api_key: str = None, llm_base: str = None, assets: List[Dict] = None):
+        """Initialize analyzer with asset registry and LLM config"""
+        self.asset_registry = {}
         
-        # Load from environment variables
         self.model = model or os.getenv("MODEL", "gpt-4o-mini")
         self.api_key = api_key or os.getenv("API_KEY")
         self.llm_base = llm_base or os.getenv("LLM_BASE", "https://api.openai.com/v1")
@@ -241,169 +219,93 @@ class TelegramRelevanceAnalyzer:
         self._tl = threading.local()
         logger.info(f"[TELEGRAM_ANALYZER] LLM cache enabled: max_size={cache_size}, ttl={cache_ttl}s")
 
-        # Initialize subnets
-        if subnets:
-            self.subnets = {s["id"]: s for s in subnets}
-            for s in subnets:
-                self.subnet_registry[s["id"]] = s
+        if assets:
+            self.assets = {a["id"]: a for a in assets}
+            for a in assets:
+                self.asset_registry[a["id"]] = a
         else:
-            self.subnets = {}
+            self.assets = {}
         
-        # Add NONE subnet
-        self.subnets[0] = {
+        self.assets[0] = {
             "id": 0,
+            "symbol": "NONE",
             "name": "NONE_OF_THE_ABOVE",
-            "description": "General BitTensor content not specific to a listed subnet"
+            "description": "Content not specific to a listed crypto asset"
         }
         
         logger.info(f"[TELEGRAM_ANALYZER] Initialized with model: {self.model}")
-        if subnets:
-            logger.info(f"[TELEGRAM_ANALYZER] Registered {len(self.subnets)-1} subnets (+1 NONE)")
+        if assets:
+            logger.info(f"[TELEGRAM_ANALYZER] Registered {len(self.assets)-1} assets (+1 NONE)")
     
-    def register_subnet(self, subnet_data: dict):
-        """Register a subnet"""
-        subnet_id = subnet_data['id']
-        self.subnet_registry[subnet_id] = subnet_data
-        self.subnets[subnet_id] = subnet_data
-        logger.debug(f"[TELEGRAM_ANALYZER] Registered subnet {subnet_id}: {subnet_data.get('name')}")
+    def register_asset(self, asset_data: dict):
+        """Register a crypto asset"""
+        asset_id = asset_data['id']
+        self.asset_registry[asset_id] = asset_data
+        self.assets[asset_id] = asset_data
+        logger.debug(f"[TELEGRAM_ANALYZER] Registered asset {asset_id}: {asset_data.get('symbol')}")
     
-    def extract_subnet_mentions(self, text: str) -> List[Tuple[int, str, str]]:
+    def identify_asset_from_text(self, text: str) -> Dict:
         """
-        Extract subnet mentions from text using various patterns.
-        
-        Args:
-            text: Text to search for subnet mentions
-            
-        Returns:
-            List of (subnet_id, matched_text, pattern_type) tuples
-        """
-        mentions = []
-        
-        for pattern, pattern_type in SUBNET_PATTERNS:
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                subnet_id = int(match.group(1))
-                matched_text = match.group(0)
-                mentions.append((subnet_id, matched_text, pattern_type))
-        
-        return mentions
-    
-    def identify_subnet_from_text(self, text: str) -> Dict:
-        """
-        Identify subnet from text using pattern matching.
+        Identify crypto asset from text using keyword matching.
         
         Priority:
-        1. Explicit SN pattern (SN45, SN 45)
-        2. Subnet pattern (subnet 45)
-        3. Subnet name/alias matching
+        1. Cashtag match ($BTC, $ETH, etc.)
+        2. Word-boundary match on unique_identifiers
         
         Args:
             text: Combined message text
             
         Returns:
-            Dict with id, name, confidence, evidence, anchors
+            Dict with id, symbol, confidence, evidence
         """
         text_lower = text.lower()
         
-        # Check for BitTensor anchors
-        has_anchor = bool(re.search(r'\bsn\s*\d+\b|\bsubnet\b|\bbittensor\b|\btao\b|\$tao\b|\bopentensor\b', text_lower))
-        
-        # Extract explicit subnet mentions
-        mentions = self.extract_subnet_mentions(text)
-        
-        if mentions:
-            # Count mentions per subnet
-            subnet_counts = {}
-            for subnet_id, matched_text, pattern_type in mentions:
-                if subnet_id not in subnet_counts:
-                    subnet_counts[subnet_id] = {'count': 0, 'evidence': [], 'patterns': set()}
-                subnet_counts[subnet_id]['count'] += 1
-                subnet_counts[subnet_id]['evidence'].append(matched_text)
-                subnet_counts[subnet_id]['patterns'].add(pattern_type)
-            
-            # Pick the most mentioned subnet
-            top_subnet = max(subnet_counts.items(), key=lambda x: x[1]['count'])
-            subnet_id = top_subnet[0]
-            subnet_info = top_subnet[1]
-            
-            # Check if subnet is registered
-            if subnet_id in self.subnets:
-                subnet_name = self.subnets[subnet_id].get('name', f'Subnet {subnet_id}')
-            else:
-                subnet_name = f'Subnet {subnet_id}'
-            
-            # Determine confidence
-            if subnet_info['count'] >= 3:
-                confidence = 'high'
-            elif subnet_info['count'] >= 2 or 'sn_format' in subnet_info['patterns']:
-                confidence = 'high'
-            else:
-                confidence = 'medium'
-            
-            return {
-                'id': subnet_id,
-                'name': subnet_name,
-                'confidence': confidence,
-                'evidence': list(set(subnet_info['evidence'])),
-                'anchors': ['bittensor'] if has_anchor else []
-            }
-        
-        # Fall back to keyword-based matching if no explicit mentions
-        return self._keyword_based_subnet_match(text, has_anchor)
-    
-    def _keyword_based_subnet_match(self, text: str, has_anchor: bool) -> Dict:
-        """
-        Fallback keyword-based matching using subnet names and identifiers.
-        """
-        text_lower = text.lower()
-        
-        # Extract words for matching (4+ chars, exclude ecosystem terms)
-        ecosystem = re.compile(r'^(bittensor|opentensor|tao|subnets?|sn\d+)$')
-        words = {w for w in re.findall(r'\b\w{4,}\b', text_lower) if not ecosystem.match(w)}
-        
-        # Find subnet matches
         matches = []
-        for sid, data in self.subnets.items():
-            if sid == 0:
+        for aid, data in self.assets.items():
+            if aid == 0:
                 continue
             
-            best = (0.0, [])
-            for name in [data.get('name', '')] + data.get('unique_identifiers', []):
-                if not name or len(name) < 4 or ecosystem.match(name.lower()):
-                    continue
-                name_lower = name.lower()
-                
-                # Exact match
-                if name_lower in words:
-                    best = (0.9, [name])
-                    break
-                
-                # Fuzzy match (edit distance >= 0.85)
-                for word in words:
-                    sim = SequenceMatcher(None, word, name_lower).ratio()
-                    if sim >= 0.85 and sim > best[0]:
-                        best = (sim * 0.9, [f'{word}≈{name}'])
+            symbol = data.get('symbol', '')
+            evidence = []
             
-            if best[0] >= 0.75:
-                matches.append((sid, data['name'], best[0], best[1]))
+            for tag in data.get('cashtags', []):
+                if tag.lower() in text_lower:
+                    evidence.append(tag)
+            
+            if evidence:
+                matches.append((aid, symbol, 1.0, evidence))
+                continue
+            
+            for identifier in data.get('case_sensitive_identifiers', []):
+                if len(identifier) < 3:
+                    continue
+                if re.search(rf'\b{re.escape(identifier)}\b', text):
+                    evidence.append(identifier)
+            
+            for identifier in data.get('unique_identifiers', []):
+                id_lower = identifier.lower()
+                if len(id_lower) < 3:
+                    continue
+                if re.search(rf'\b{re.escape(id_lower)}\b', text_lower):
+                    evidence.append(identifier)
+            
+            if evidence:
+                confidence_score = 0.9 if len(evidence) > 1 else 0.8
+                matches.append((aid, symbol, confidence_score, evidence))
         
-        # Sort by score descending
         matches.sort(key=lambda x: x[2], reverse=True)
-        
-        if not has_anchor and not matches:
-            return {'id': 0, 'name': "NONE_OF_THE_ABOVE", 'confidence': "low", 'evidence': [], 'anchors': []}
         
         if matches:
             top = matches[0]
-            confidence = 'high' if top[2] >= 0.9 else 'medium' if top[2] >= 0.8 else 'low'
+            confidence = 'high' if top[2] >= 0.9 else 'medium'
             return {
                 'id': top[0],
-                'name': top[1],
+                'symbol': top[1],
                 'confidence': confidence,
                 'evidence': top[3],
-                'anchors': []
             }
         
-        return {'id': 0, 'name': "NONE_OF_THE_ABOVE", 'confidence': "low", 'evidence': [], 'anchors': []}
+        return {'id': 0, 'symbol': "NONE", 'confidence': "low", 'evidence': []}
     
     def _normalize_messages(self, messages: List) -> List[TelegramMessage]:
         """Convert dict messages to TelegramMessage objects if needed"""
@@ -434,14 +336,13 @@ class TelegramRelevanceAnalyzer:
         """Combine message contents only (no usernames)"""
         return " ".join([msg.content for msg in messages])
     
-    def classify_message_group(self, messages: List, subnet_id: Optional[int] = None) -> Optional[MessageGroupClassification]:
+    def classify_message_group(self, messages: List, asset_id: Optional[int] = None) -> Optional[MessageGroupClassification]:
         """
         Classify a group of Telegram messages.
         
         Args:
             messages: List of TelegramMessage objects or dicts to analyze as a group.
-                     Dicts should have: message_id, username, content (or text), timestamp (optional), reply_to (optional)
-            subnet_id: Optional subnet ID (e.g., 45, 30). If provided, uses this subnet instead of detecting from text.
+            asset_id: Optional asset ID. If provided, uses this asset instead of detecting from text.
             
         Returns:
             MessageGroupClassification if successful, None if parsing fails
@@ -450,75 +351,54 @@ class TelegramRelevanceAnalyzer:
             return None
         
         try:
-            # Normalize messages (convert dicts to TelegramMessage if needed)
             normalized_messages = self._normalize_messages(messages)
-            
-            # Combine messages for analysis
             combined_text = self._combine_messages(normalized_messages)
             simple_text = self._combine_messages_simple(normalized_messages)
 
-            cache_key = f"{simple_text}||sn={subnet_id}"
+            cache_key = f"{simple_text}||asset={asset_id}"
             cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
 
             self._tl.had_llm_error = False
 
-            # Step 1: Identify subnet - use provided subnet_id or detect from text
-            if subnet_id is not None:
-                # Use provided subnet ID
-                if subnet_id in self.subnets:
-                    subnet_name = self.subnets[subnet_id].get('name', f'Subnet {subnet_id}')
+            if asset_id is not None:
+                if asset_id in self.assets:
+                    asset_symbol = self.assets[asset_id].get('symbol', 'NONE')
                 else:
-                    subnet_name = f'Subnet {subnet_id}'
+                    asset_symbol = f'ASSET_{asset_id}'
                 
-                # Extract evidence spans from text
-                mentions = self.extract_subnet_mentions(simple_text)
-                evidence = [m[1] for m in mentions if m[0] == subnet_id]
-                if not evidence:
-                    # If no explicit mention found, use any subnet mentions as evidence
-                    evidence = [m[1] for m in mentions] if mentions else []
-                
-                # Check for BitTensor anchors
-                has_anchor = bool(re.search(r'\bsn\s*\d+\b|\bsubnet\b|\bbittensor\b|\btao\b|\$tao\b|\bopentensor\b', simple_text.lower()))
-                
-                subnet_result = {
-                    'id': subnet_id,
-                    'name': subnet_name,
-                    'confidence': 'high' if evidence or has_anchor else 'medium',
-                    'evidence': evidence if evidence else [f'SN{subnet_id}'],
-                    'anchors': ['bittensor'] if has_anchor else []
+                asset_result = {
+                    'id': asset_id,
+                    'symbol': asset_symbol,
+                    'confidence': 'high',
+                    'evidence': [asset_symbol],
                 }
             else:
-                # Detect subnet from text
-                subnet_result = self.identify_subnet_from_text(simple_text)
+                asset_result = self.identify_asset_from_text(simple_text)
             
-            # Step 2-6: Classify other dimensions atomically
             content_type = self._classify_content_type(combined_text)
             sentiment = self._classify_sentiment(combined_text)
             technical_quality = self._assess_technical_quality(combined_text)
             market_analysis = self._classify_market_analysis(combined_text)
             impact = self._assess_impact(combined_text)
             
-            # Identify contributing messages (those with subnet mentions)
             contributing = []
             for msg in normalized_messages:
-                mentions = self.extract_subnet_mentions(msg.content)
-                if mentions:
+                msg_result = self.identify_asset_from_text(msg.content)
+                if msg_result['id'] != 0:
                     contributing.append(msg.message_id)
             
-            # Build final classification
             result = MessageGroupClassification(
-                subnet_id=subnet_result['id'],
-                subnet_name=subnet_result['name'],
+                asset_id=asset_result['id'],
+                asset_symbol=asset_result['symbol'],
                 content_type=ContentType(content_type),
                 sentiment=Sentiment(sentiment),
                 technical_quality=TechnicalQuality(technical_quality),
                 market_analysis=MarketAnalysis(market_analysis),
                 impact_potential=ImpactPotential(impact),
-                relevance_confidence=subnet_result['confidence'],
-                evidence_spans=subnet_result['evidence'],
-                anchors_detected=subnet_result['anchors'],
+                relevance_confidence=asset_result['confidence'],
+                evidence_spans=asset_result['evidence'],
                 message_count=len(normalized_messages),
                 contributing_messages=contributing
             )
@@ -530,13 +410,13 @@ class TelegramRelevanceAnalyzer:
             logger.error(f"[TELEGRAM_ANALYZER] Classification error: {e}")
             return None
     
-    def classify_messages_from_dicts(self, messages: List[Dict], subnet_id: Optional[int] = None) -> Optional[MessageGroupClassification]:
+    def classify_messages_from_dicts(self, messages: List[Dict], asset_id: Optional[int] = None) -> Optional[MessageGroupClassification]:
         """
         Classify messages from dictionary format.
         
         Args:
             messages: List of dicts with keys: message_id, username, content, timestamp (optional), reply_to (optional)
-            subnet_id: Optional subnet ID (e.g., 45, 30). If provided, uses this subnet instead of detecting from text.
+            asset_id: Optional asset ID. If provided, uses this asset instead of detecting from text.
             
         Returns:
             MessageGroupClassification if successful, None if parsing fails
@@ -550,7 +430,7 @@ class TelegramRelevanceAnalyzer:
                 timestamp=msg.get('timestamp'),
                 reply_to=msg.get('reply_to')
             ))
-        return self.classify_message_group(telegram_messages, subnet_id=subnet_id)
+        return self.classify_message_group(telegram_messages, asset_id=asset_id)
     
     def classify_last_message_sentiment(self, messages: List) -> Optional[Sentiment]:
         """
@@ -738,39 +618,37 @@ Choose the sentiment that best matches the overall tone:
             self._tl.had_llm_error = True
             return "NONE"
     
-    def analyze_message_group_complete(self, messages: List, subnet_id: Optional[int] = None) -> dict:
+    def analyze_message_group_complete(self, messages: List, asset_id: Optional[int] = None) -> dict:
         """
         Analyze message group and return rich classification data.
         
         Args:
-            messages: List of TelegramMessage objects or dicts. Dicts should have: message_id, username, content (or text)
-            subnet_id: Optional subnet ID (e.g., 45, 30). If provided, uses this subnet instead of detecting from text.
+            messages: List of TelegramMessage objects or dicts.
+            asset_id: Optional asset ID. If provided, uses this asset instead of detecting from text.
             
         Returns:
-            Dict with classification, subnet_relevance, sentiment info
+            Dict with classification, asset_relevance, sentiment info
         """
         import time
         start_time = time.time()
-        logger.info(f"[TELEGRAM_ANALYZER] Starting analysis for {len(messages)} messages" + (f" (subnet_id={subnet_id})" if subnet_id else ""))
+        logger.info(f"[TELEGRAM_ANALYZER] Starting analysis for {len(messages)} messages" + (f" (asset_id={asset_id})" if asset_id else ""))
         
-        # Run atomic classification
-        classification = self.classify_message_group(messages, subnet_id=subnet_id)
+        classification = self.classify_message_group(messages, asset_id=asset_id)
         
         if classification is None:
             logger.warning(f"[TELEGRAM_ANALYZER] Classification failed")
             return {
                 "classification": None,
-                "subnet_relevance": {},
+                "asset_relevance": {},
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Build subnet_relevance dict
-        subnet_relevance = {}
-        if classification.subnet_id != 0:
-            subnet_name = classification.subnet_name
-            subnet_relevance[subnet_name] = {
-                "subnet_id": classification.subnet_id,
-                "subnet_name": subnet_name,
+        asset_relevance = {}
+        if classification.asset_id != 0:
+            symbol = classification.asset_symbol
+            asset_relevance[symbol] = {
+                "asset_id": classification.asset_id,
+                "asset_symbol": symbol,
                 "relevance": 1.0,
                 "relevance_confidence": classification.relevance_confidence,
                 "content_type": classification.content_type.value,
@@ -779,7 +657,6 @@ Choose the sentiment that best matches the overall tone:
                 "market_analysis": classification.market_analysis.value,
                 "impact_potential": classification.impact_potential.value,
                 "evidence_spans": classification.evidence_spans,
-                "anchors_detected": classification.anchors_detected,
                 "message_count": classification.message_count,
                 "contributing_messages": classification.contributing_messages,
             }
@@ -787,7 +664,6 @@ Choose the sentiment that best matches the overall tone:
         total_time = time.time() - start_time
         logger.info(f"[TELEGRAM_ANALYZER] Analysis completed in {total_time:.2f}s")
         
-        # Sentiment mapping for backward compatibility
         sentiment_to_float = {
             "very_bullish": 1.0,
             "bullish": 0.5,
@@ -800,20 +676,20 @@ Choose the sentiment that best matches the overall tone:
         
         return {
             "classification": classification,
-            "subnet_relevance": subnet_relevance,
+            "asset_relevance": asset_relevance,
             "sentiment": sentiment_float,
             "sentiment_enum": sentiment_enum,
             "message_count": len(messages),
             "timestamp": datetime.now().isoformat()
         }
     
-    def analyze_messages_from_dicts_complete(self, messages: List[Dict], subnet_id: Optional[int] = None) -> dict:
+    def analyze_messages_from_dicts_complete(self, messages: List[Dict], asset_id: Optional[int] = None) -> dict:
         """
         Convenience method to analyze messages from dictionary format.
         
         Args:
             messages: List of message dicts
-            subnet_id: Optional subnet ID (e.g., 45, 30). If provided, uses this subnet instead of detecting from text.
+            asset_id: Optional asset ID. If provided, uses this asset instead of detecting from text.
             
         Returns:
             Dict with classification results
@@ -827,5 +703,5 @@ Choose the sentiment that best matches the overall tone:
                 timestamp=msg.get('timestamp'),
                 reply_to=msg.get('reply_to')
             ))
-        return self.analyze_message_group_complete(telegram_messages, subnet_id=subnet_id)
+        return self.analyze_message_group_complete(telegram_messages, asset_id=asset_id)
 
