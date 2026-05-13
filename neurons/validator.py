@@ -8,6 +8,7 @@ Validator entrypoint.
 
 import asyncio
 import concurrent.futures
+import copy
 import gc
 import time
 from typing import List, Optional, Set
@@ -97,28 +98,36 @@ class Validator(BaseValidatorNeuron):
         
     async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
         """
-        The synapse is a TweetBatch from the miner
+        Axon handler for miner push-back of analyzed TweetBatch results.
+
+        Validates store state synchronously (fast), then queues LLM validation
+        as a background task so the axon returns immediately and the miner
+        does not hit a 30s dendrite timeout.
         """
-        # Push-based mining: this *is* where we validate miner results.
         miner_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
         if not miner_hotkey:
             return synapse
 
         bt.logging.info(f"[VALIDATION] Received TweetBatch with {len(synapse.tweet_batch)} tweet(s) from miner {miner_hotkey[:12]}..")
 
-        # Build the original batch from the local store to prevent cherry-picking and
-        # to avoid penalizing miners for the initial "ack" response (which has no analysis).
         sent_batch: List[TweetWithAuthor] = []
         for returned in synapse.tweet_batch:
             tid = str(getattr(returned, "id", ""))
             if not tid:
                 continue
             try:
-                # Only accept results for tweets we currently consider "processing" for that miner.
-                # If we can't match (e.g. validator restarted, timeout already requeued), ignore quietly.
-                if self._tweet_store.get_status(tid).value != "Processing":
+                status = self._tweet_store.get_status(tid).value
+                if status != "Processing":
+                    bt.logging.info(
+                        f"[VALIDATION] Dropping TweetBatch from {miner_hotkey[:12]}.. "
+                        f"tweet {tid} status={status} (expected Processing)"
+                    )
                     return synapse
                 if self._tweet_store.get_hotkey(tid) != miner_hotkey:
+                    bt.logging.info(
+                        f"[VALIDATION] Dropping TweetBatch from {miner_hotkey[:12]}.. "
+                        f"tweet {tid} hotkey mismatch"
+                    )
                     return synapse
                 sent_batch.append(self._tweet_store.get_tweet(tid))
             except Exception:
@@ -127,33 +136,54 @@ class Validator(BaseValidatorNeuron):
         if not sent_batch:
             return synapse
 
-        await self._handle_miner_batch_response(synapse.tweet_batch, miner_hotkey, sent_batch)
+        # Reset the timeout clock — the miner delivered results, we just need
+        # time to grade them. Without this, slow LLM validation could trigger
+        # a false timeout penalty even though results arrived on time.
+        for returned in synapse.tweet_batch:
+            tid = str(getattr(returned, "id", ""))
+            if tid and tid in self._tweet_store._tweets:
+                self._tweet_store._tweets[tid].start_time = time.time()
+
+        # Queue validation as a background task so we return immediately.
+        batch_copy = copy.deepcopy(synapse.tweet_batch)
+        sent_batch_copy = copy.deepcopy(sent_batch)
+        task = asyncio.create_task(
+            self._handle_miner_batch_response(batch_copy, miner_hotkey, sent_batch_copy)
+        )
+        self._track_task(task)
         return synapse
 
     async def forward_telegram_messages(self, synapse: talisman_ai.protocol.TelegramBatch) -> talisman_ai.protocol.TelegramBatch:
         """
-        The synapse is a TelegramBatch from the miner
+        Axon handler for miner push-back of analyzed TelegramBatch results.
+
+        Validates store state synchronously (fast), then queues LLM validation
+        as a background task so the axon returns immediately.
         """
-        # Push-based mining: this *is* where we validate miner results.
         miner_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
         if not miner_hotkey:
             return synapse
 
         bt.logging.info(f"[VALIDATION] Received TelegramBatch with {len(synapse.message_batch)} message(s) from miner {miner_hotkey[:12]}..")
 
-        # Build the original batch from the local store to prevent cherry-picking and
-        # to avoid penalizing miners for the initial "ack" response (which has no analysis).
         sent_batch: List[TelegramMessageForScoring] = []
         for returned in synapse.message_batch:
             msg_id = str(getattr(returned, "id", ""))
             if not msg_id:
                 continue
             try:
-                # Only accept results for messages we currently consider "processing" for that miner.
-                # If we can't match (e.g. validator restarted, timeout already requeued), ignore quietly.
-                if self._telegram_store.get_status(msg_id).value != "Processing":
+                status = self._telegram_store.get_status(msg_id).value
+                if status != "Processing":
+                    bt.logging.info(
+                        f"[VALIDATION] Dropping TelegramBatch from {miner_hotkey[:12]}.. "
+                        f"message {msg_id} status={status} (expected Processing)"
+                    )
                     return synapse
                 if self._telegram_store.get_hotkey(msg_id) != miner_hotkey:
+                    bt.logging.info(
+                        f"[VALIDATION] Dropping TelegramBatch from {miner_hotkey[:12]}.. "
+                        f"message {msg_id} hotkey mismatch"
+                    )
                     return synapse
                 sent_batch.append(self._telegram_store.get_message(msg_id))
             except Exception:
@@ -162,7 +192,20 @@ class Validator(BaseValidatorNeuron):
         if not sent_batch:
             return synapse
 
-        await self._handle_telegram_miner_batch_response(synapse.message_batch, miner_hotkey, sent_batch)
+        # Reset the timeout clock — the miner delivered results, we just need
+        # time to grade them.
+        for returned in synapse.message_batch:
+            msg_id = str(getattr(returned, "id", ""))
+            if msg_id and msg_id in self._telegram_store._messages:
+                self._telegram_store._messages[msg_id].start_time = time.time()
+
+        # Queue validation as a background task so we return immediately.
+        batch_copy = copy.deepcopy(synapse.message_batch)
+        sent_batch_copy = copy.deepcopy(sent_batch)
+        task = asyncio.create_task(
+            self._handle_telegram_miner_batch_response(batch_copy, miner_hotkey, sent_batch_copy)
+        )
+        self._track_task(task)
         return synapse
 
     def _track_task(self, task: asyncio.Task) -> None:

@@ -87,6 +87,9 @@ VALIDATION_POLL_SECONDS = int(os.getenv("VALIDATION_POLL_SECONDS", os.getenv("BA
 SCORES_BLOCK_INTERVAL = int(os.getenv("SCORES_BLOCK_INTERVAL", "100"))
 
 MINER_BATCH_SIZE = int(os.getenv("MINER_BATCH_SIZE", "3"))
+# How many tweets/messages to fetch from the API per poll cycle.
+# Fetched items are split into MINER_BATCH_SIZE chunks and dispatched to different miners.
+VALIDATION_FETCH_LIMIT = int(os.getenv("VALIDATION_FETCH_LIMIT", "24"))
 BLOCK_LENGTH = int(os.getenv("BLOCK_LENGTH", "100"))
 START_BLOCK = int(os.getenv("START_BLOCK", "0"))
 
@@ -98,7 +101,7 @@ VALIDATOR_MAX_PENDING_MINER_TASKS = int(os.getenv("VALIDATOR_MAX_PENDING_MINER_T
 
 # Validation thread pool: controls how many concurrent LLM-based validations run.
 # Lower values reduce LLM API pressure at the cost of slower validation throughput.
-VALIDATION_MAX_WORKERS = int(os.getenv("VALIDATION_MAX_WORKERS", "2"))
+VALIDATION_MAX_WORKERS = int(os.getenv("VALIDATION_MAX_WORKERS", "8"))
 
 # LLM result cache: avoids redundant API calls for identical post text.
 LLM_CACHE_TTL = float(os.getenv("LLM_CACHE_TTL", "300"))

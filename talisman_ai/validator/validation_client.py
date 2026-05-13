@@ -87,7 +87,7 @@ class ValidationClient:
                             bt.logging.info(f"[ValidationClient.run] Adding penalty to hotkey {tweet.hotkey} for tweet id {tweet.tweet.id}")
                             self._validator._miner_penalty.add_penalty(tweet.hotkey, 1)
                     bt.logging.debug("[ValidationClient.run] Fetching unscored tweets from api and local store")
-                    unscored_tweets = (await self.api_client.get_unscored_tweets(limit=config.MINER_BATCH_SIZE)) + [tweet.tweet for tweet in self._validator._tweet_store.get_unprocessed_tweets()]
+                    unscored_tweets = (await self.api_client.get_unscored_tweets(limit=config.VALIDATION_FETCH_LIMIT)) + [tweet.tweet for tweet in self._validator._tweet_store.get_unprocessed_tweets()]
                     # Reset error counter on success
                     self._consecutive_errors = 0
                 except Exception as e:
@@ -120,7 +120,7 @@ class ValidationClient:
                                 bt.logging.info(f"[ValidationClient.run] Adding penalty to hotkey {msg_item.hotkey} for telegram message id {msg_item.message.id}")
                                 self._validator._miner_penalty.add_penalty(msg_item.hotkey, 1)
                         bt.logging.debug("[ValidationClient.run] Fetching unscored telegram messages from api and local store")
-                        unscored_telegram_messages = (await self.api_client.get_unscored_telegram_messages(limit=config.MINER_BATCH_SIZE)) + [item.message for item in self._validator._telegram_store.get_unprocessed_messages()]
+                        unscored_telegram_messages = (await self.api_client.get_unscored_telegram_messages(limit=config.VALIDATION_FETCH_LIMIT)) + [item.message for item in self._validator._telegram_store.get_unprocessed_messages()]
                         
                         if unscored_telegram_messages:
                             bt.logging.debug(f"[ValidationClient.run] Passing {len(unscored_telegram_messages)} unscored telegram messages to on_telegram_messages() callback")
