@@ -74,6 +74,14 @@ class ValidationClient:
         self._running = True
         bt.logging.info("[ValidationClient.run] Entering main validation loop (poll_interval=%ss, scores_interval=%s blocks)", self.poll_seconds, self.scores_block_interval)
 
+        # Bootstrap remote config on startup
+        config.set_wallet(self.wallet)
+        try:
+            config.refresh_remote_config(force=True)
+            bt.logging.info("[ValidationClient.run] Remote config loaded on startup")
+        except Exception as e:
+            bt.logging.warning(f"[ValidationClient.run] Remote config fetch failed on startup: {e}")
+
         while self._running:
             try:
                 bt.logging.debug("[ValidationClient.run] Top of poll loop")
@@ -172,6 +180,21 @@ class ValidationClient:
                     self._validator._telegram_store.save_to_file()
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] Failed to persist telegram store: {e}")
+
+                # ---- Periodic remote config refresh ----
+                try:
+                    config.refresh_remote_config()
+                    reset_epoch, purge_hotkeys = config.get_pending_resets()
+                    if reset_epoch >= 0:
+                        bt.logging.info(f"[REMOTE_CONFIG] Flushing broadcast rewards for epochs <= {reset_epoch}")
+                        self._validator._reward_broadcasts.flush_before_epoch(reset_epoch)
+                        self._validator._penalty_broadcasts.flush_before_epoch(reset_epoch)
+                    if purge_hotkeys:
+                        bt.logging.info(f"[REMOTE_CONFIG] Purging broadcast data for {len(purge_hotkeys)} hotkeys")
+                        self._validator._reward_broadcasts.purge_hotkeys(purge_hotkeys)
+                        self._validator._penalty_broadcasts.purge_hotkeys(purge_hotkeys)
+                except Exception as e:
+                    bt.logging.debug(f"[ValidationClient.run] Remote config refresh error: {e}")
 
                 # ---- Broadcast rewards + penalties to other validators ----
                 current_epoch = self._validator._miner_reward._get_current_epoch()
@@ -300,11 +323,18 @@ class ValidationClient:
 
                 bt.logging.info(f"[REWARDS] Local rewards: {combined_uid_rewards}")
 
-                # Broadcasted rewards
+                # Broadcasted rewards (filter blacklisted hotkeys)
                 try:
                     broadcast_uid_rewards = self._validator._reward_broadcasts.aggregate_epoch(target_epoch)
                     bt.logging.debug(f"[ValidationClient.run] Aggregated broadcast_uid_rewards: {broadcast_uid_rewards}")
                     for uid, pts in broadcast_uid_rewards.items():
+                        try:
+                            hk = self._validator.metagraph.hotkeys[int(uid)]
+                            if hk in config.BLACKLISTED_MINER_HOTKEYS:
+                                bt.logging.info(f"[REWARDS] Ignoring broadcast rewards for blacklisted UID={uid} hotkey={hk[:12]}..")
+                                continue
+                        except Exception:
+                            pass
                         combined_uid_rewards[uid] = combined_uid_rewards.get(uid, 0) + int(pts)
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] [BROADCAST] Failed to aggregate rewards: {e}")

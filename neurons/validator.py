@@ -95,6 +95,8 @@ class Validator(BaseValidatorNeuron):
         self._max_pending_miner_tasks: int = int(
             getattr(config, "VALIDATOR_MAX_PENDING_MINER_TASKS", 256)
         )
+        self._validating_tweet_ids: set = set()
+        self._validating_message_ids: set = set()
         
     async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
         """
@@ -115,6 +117,12 @@ class Validator(BaseValidatorNeuron):
             tid = str(getattr(returned, "id", ""))
             if not tid:
                 continue
+            if tid in self._validating_tweet_ids:
+                bt.logging.info(
+                    f"[VALIDATION] Dropping TweetBatch from {miner_hotkey[:12]}.. "
+                    f"tweet {tid} already being validated (replay blocked)"
+                )
+                return synapse
             try:
                 status = self._tweet_store.get_status(tid).value
                 if status != "Processing":
@@ -136,6 +144,10 @@ class Validator(BaseValidatorNeuron):
         if not sent_batch:
             return synapse
 
+        # Lock these tweet IDs so replays are rejected while validation runs.
+        batch_tids = {str(getattr(r, "id", "")) for r in synapse.tweet_batch if getattr(r, "id", "")}
+        self._validating_tweet_ids.update(batch_tids)
+
         # Reset the timeout clock — the miner delivered results, we just need
         # time to grade them. Without this, slow LLM validation could trigger
         # a false timeout penalty even though results arrived on time.
@@ -147,9 +159,14 @@ class Validator(BaseValidatorNeuron):
         # Queue validation as a background task so we return immediately.
         batch_copy = copy.deepcopy(synapse.tweet_batch)
         sent_batch_copy = copy.deepcopy(sent_batch)
-        task = asyncio.create_task(
-            self._handle_miner_batch_response(batch_copy, miner_hotkey, sent_batch_copy)
-        )
+
+        async def _validate_and_release():
+            try:
+                await self._handle_miner_batch_response(batch_copy, miner_hotkey, sent_batch_copy)
+            finally:
+                self._validating_tweet_ids -= batch_tids
+
+        task = asyncio.create_task(_validate_and_release())
         self._track_task(task)
         return synapse
 
@@ -171,6 +188,12 @@ class Validator(BaseValidatorNeuron):
             msg_id = str(getattr(returned, "id", ""))
             if not msg_id:
                 continue
+            if msg_id in self._validating_message_ids:
+                bt.logging.info(
+                    f"[VALIDATION] Dropping TelegramBatch from {miner_hotkey[:12]}.. "
+                    f"message {msg_id} already being validated (replay blocked)"
+                )
+                return synapse
             try:
                 status = self._telegram_store.get_status(msg_id).value
                 if status != "Processing":
@@ -192,6 +215,10 @@ class Validator(BaseValidatorNeuron):
         if not sent_batch:
             return synapse
 
+        # Lock these message IDs so replays are rejected while validation runs.
+        batch_mids = {str(getattr(r, "id", "")) for r in synapse.message_batch if getattr(r, "id", "")}
+        self._validating_message_ids.update(batch_mids)
+
         # Reset the timeout clock — the miner delivered results, we just need
         # time to grade them.
         for returned in synapse.message_batch:
@@ -202,9 +229,14 @@ class Validator(BaseValidatorNeuron):
         # Queue validation as a background task so we return immediately.
         batch_copy = copy.deepcopy(synapse.message_batch)
         sent_batch_copy = copy.deepcopy(sent_batch)
-        task = asyncio.create_task(
-            self._handle_telegram_miner_batch_response(batch_copy, miner_hotkey, sent_batch_copy)
-        )
+
+        async def _validate_and_release():
+            try:
+                await self._handle_telegram_miner_batch_response(batch_copy, miner_hotkey, sent_batch_copy)
+            finally:
+                self._validating_message_ids -= batch_mids
+
+        task = asyncio.create_task(_validate_and_release())
         self._track_task(task)
         return synapse
 
@@ -511,6 +543,10 @@ class Validator(BaseValidatorNeuron):
             except Exception:
                 miner_hotkey = None
 
+            if miner_hotkey and miner_hotkey in config.BLACKLISTED_MINER_HOTKEYS:
+                bt.logging.info(f"[VALIDATION] Skipping blacklisted miner UID={uid} hotkey={miner_hotkey[:12]}..")
+                return None
+
             # Mark tweets as processing immediately (record attribution + start time).
             for tweet in miner_batch:
                 # Ensure tweet exists in the store.
@@ -572,6 +608,10 @@ class Validator(BaseValidatorNeuron):
                 miner_hotkey = self.metagraph.hotkeys[int(uid)]
             except Exception:
                 miner_hotkey = None
+
+            if miner_hotkey and miner_hotkey in config.BLACKLISTED_MINER_HOTKEYS:
+                bt.logging.info(f"[VALIDATION] Skipping blacklisted miner UID={uid} hotkey={miner_hotkey[:12]}.. (telegram)")
+                return None
 
             # Mark messages as processing immediately (record attribution + start time).
             for msg in miner_batch:

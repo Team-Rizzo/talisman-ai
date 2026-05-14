@@ -145,12 +145,19 @@ class TalismanAPIClient:
         timestamp = time.time()
         message = self._create_auth_message(timestamp)
         signature = self._sign_message(message)
-        
+
+        try:
+            from talisman_ai import __version__
+            version = __version__
+        except Exception:
+            version = "0.0.0"
+
         return {
             "X-Auth-SS58Address": self.ss58_address,
             "X-Auth-Signature": signature,
             "X-Auth-Message": message,
             "X-Auth-Timestamp": str(timestamp),
+            "X-Validator-Version": version,
             "Content-Type": "application/json",
         }
     

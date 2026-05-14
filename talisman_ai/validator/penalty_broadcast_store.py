@@ -120,6 +120,32 @@ class PenaltyBroadcastStore:
                 agg[uid_i] = agg.get(uid_i, 0) + int(cnt)
         return agg
 
+    # -------------------------------------------------------------------------
+    # Remote reset helpers
+    # -------------------------------------------------------------------------
+    def flush_before_epoch(self, epoch: int) -> int:
+        """Remove all broadcast data for epochs <= epoch. Returns count of epochs removed."""
+        removed = 0
+        for old_epoch in list(self.by_epoch_by_sender.keys()):
+            if int(old_epoch) <= int(epoch):
+                del self.by_epoch_by_sender[old_epoch]
+                removed += 1
+        if removed:
+            self.save()
+        return removed
+
+    def purge_hotkeys(self, hotkeys: list) -> None:
+        """Remove broadcast entries from the given sender hotkeys."""
+        hk_set = set(hotkeys)
+        for epoch in list(self.by_epoch_by_sender.keys()):
+            senders = self.by_epoch_by_sender[epoch]
+            for sender in list(senders.keys()):
+                if sender in hk_set:
+                    del senders[sender]
+            if not senders:
+                del self.by_epoch_by_sender[epoch]
+        self.save()
+
     def get_penalized_uids(self, epoch: int) -> set:
         """
         Get a set of UIDs that have any penalties for a given epoch.
