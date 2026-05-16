@@ -33,6 +33,7 @@ from talisman_ai.protocol import ValidatorRewards
 from talisman_ai.protocol import ValidatorPenalties
 from talisman_ai.analyzer.scoring import validate_miner_batch, validate_miner_telegram_batch
 from talisman_ai.analyzer import setup_telegram_analyzer
+from talisman_ai.utils.cooldown import MinerCooldownTracker
 class Validator(BaseValidatorNeuron):
     """
     Validator neuron for SN45.
@@ -97,7 +98,12 @@ class Validator(BaseValidatorNeuron):
         )
         self._validating_tweet_ids: set = set()
         self._validating_message_ids: set = set()
-        
+        self._cooldown_tracker = MinerCooldownTracker()
+
+    def resync_metagraph(self):
+        super().resync_metagraph()
+        self._cooldown_tracker.prune(set(self.metagraph.hotkeys))
+
     async def forward_tweets(self, synapse: talisman_ai.protocol.TweetBatch) -> talisman_ai.protocol.TweetBatch:
         """
         Axon handler for miner push-back of analyzed TweetBatch results.
@@ -257,8 +263,24 @@ class Validator(BaseValidatorNeuron):
         task.add_done_callback(_done)
 
     async def _dispatch_miner_batch(self, miner_batch: List[TweetWithAuthor], uid: int) -> None:
-        async with self._miner_dispatch_semaphore:
-            await self._process_miner_batch(miner_batch, uid)
+        hotkey = None
+        try:
+            hotkey = self.metagraph.hotkeys[int(uid)]
+        except Exception:
+            pass
+        if hotkey and not self._cooldown_tracker.try_acquire(hotkey):
+            for tweet in miner_batch:
+                try:
+                    self._tweet_store.reset_to_unprocessed(tweet.id)
+                except Exception:
+                    pass
+            return
+        try:
+            async with self._miner_dispatch_semaphore:
+                await self._process_miner_batch(miner_batch, uid)
+        finally:
+            if hotkey:
+                self._cooldown_tracker.release(hotkey)
 
     async def _handle_miner_batch_response(
         self,
@@ -473,9 +495,18 @@ class Validator(BaseValidatorNeuron):
         miner_batches = []
         for i in range(0, len(tweets), config.MINER_BATCH_SIZE):
             miner_batches.append(tweets[i:i + config.MINER_BATCH_SIZE])
-        # Select miners from the metagraph for each batch (exclude ourselves).
-        # NOTE: get_random_uids() already filters to serving axons and applies vpermit limits.
-        uids = list(get_random_uids(self, k=len(miner_batches), exclude=[int(self.uid)]))
+        # Exclude ourselves and miners on cooldown from dispatch selection.
+        cooled_hotkeys = self._cooldown_tracker.get_cooled_down_hotkeys()
+        cooled_uids = [
+            uid for uid in range(self.metagraph.n.item())
+            if self.metagraph.hotkeys[uid] in cooled_hotkeys
+        ]
+        exclude = [int(self.uid)] + cooled_uids
+        uids = list(get_random_uids(self, k=len(miner_batches), exclude=exclude))
+        tracked, on_cd = self._cooldown_tracker.stats()
+        if on_cd > 0:
+            available = len(uids)
+            bt.logging.debug(f"[COOLDOWN] {on_cd} miners on cooldown, {available} available for dispatch")
 
         for miner_batch, uid in zip(miner_batches, uids):
             if len(self._pending_miner_tasks) >= self._max_pending_miner_tasks:
@@ -504,8 +535,13 @@ class Validator(BaseValidatorNeuron):
         miner_batches = []
         for i in range(0, len(messages), config.MINER_BATCH_SIZE):
             miner_batches.append(messages[i:i + config.MINER_BATCH_SIZE])
-        # Select miners from the metagraph for each batch (exclude ourselves).
-        uids = list(get_random_uids(self, k=len(miner_batches), exclude=[int(self.uid)]))
+        cooled_hotkeys = self._cooldown_tracker.get_cooled_down_hotkeys()
+        cooled_uids = [
+            uid for uid in range(self.metagraph.n.item())
+            if self.metagraph.hotkeys[uid] in cooled_hotkeys
+        ]
+        exclude = [int(self.uid)] + cooled_uids
+        uids = list(get_random_uids(self, k=len(miner_batches), exclude=exclude))
 
         for miner_batch, uid in zip(miner_batches, uids):
             if len(self._pending_miner_tasks) >= self._max_pending_miner_tasks:
@@ -518,8 +554,24 @@ class Validator(BaseValidatorNeuron):
             self._track_task(task)
 
     async def _dispatch_telegram_miner_batch(self, miner_batch: List[TelegramMessageForScoring], uid: int) -> None:
-        async with self._miner_dispatch_semaphore:
-            await self._process_telegram_miner_batch(miner_batch, uid)
+        hotkey = None
+        try:
+            hotkey = self.metagraph.hotkeys[int(uid)]
+        except Exception:
+            pass
+        if hotkey and not self._cooldown_tracker.try_acquire(hotkey):
+            for msg in miner_batch:
+                try:
+                    self._telegram_store.reset_to_unprocessed(msg.id)
+                except Exception:
+                    pass
+            return
+        try:
+            async with self._miner_dispatch_semaphore:
+                await self._process_telegram_miner_batch(miner_batch, uid)
+        finally:
+            if hotkey:
+                self._cooldown_tracker.release(hotkey)
             
     async def _process_miner_batch( 
         self, 
@@ -568,7 +620,8 @@ class Validator(BaseValidatorNeuron):
             )
             if not responses[0].dendrite.status_code == 200:
                 bt.logging.error(f"[VALIDATION] Failed to process miner batch: {responses[0].dendrite.status_message}")
-                # Requeue locally; do not reward; do not penalize on transport errors.
+                if miner_hotkey:
+                    self._cooldown_tracker.record_failure(miner_hotkey)
                 for tweet in miner_batch:
                     try:
                         self._tweet_store.reset_to_unprocessed(tweet.id)
@@ -576,10 +629,13 @@ class Validator(BaseValidatorNeuron):
                         pass
                 return None
 
-            # Miners are expected to ack immediately and push results back to our axon later.
+            if miner_hotkey:
+                self._cooldown_tracker.record_success(miner_hotkey)
             return responses[0]
         except Exception as e:
             bt.logging.error(f"[VALIDATION] Failed to process miner batch: {e}", exc_info=True)
+            if miner_hotkey:
+                self._cooldown_tracker.record_failure(miner_hotkey)
             for tweet in miner_batch:
                 try:
                     self._tweet_store.reset_to_unprocessed(tweet.id)
@@ -634,7 +690,8 @@ class Validator(BaseValidatorNeuron):
             )
             if not responses[0].dendrite.status_code == 200:
                 bt.logging.error(f"[VALIDATION] Failed to process telegram miner batch: {responses[0].dendrite.status_message}")
-                # Requeue locally; do not reward; do not penalize on transport errors.
+                if miner_hotkey:
+                    self._cooldown_tracker.record_failure(miner_hotkey)
                 for msg in miner_batch:
                     try:
                         self._telegram_store.reset_to_unprocessed(msg.id)
@@ -642,10 +699,13 @@ class Validator(BaseValidatorNeuron):
                         pass
                 return None
 
-            # Miners are expected to ack immediately and push results back to our axon later.
+            if miner_hotkey:
+                self._cooldown_tracker.record_success(miner_hotkey)
             return responses[0]
         except Exception as e:
             bt.logging.error(f"[VALIDATION] Failed to process telegram miner batch: {e}", exc_info=True)
+            if miner_hotkey:
+                self._cooldown_tracker.record_failure(miner_hotkey)
             for msg in miner_batch:
                 try:
                     self._telegram_store.reset_to_unprocessed(msg.id)
