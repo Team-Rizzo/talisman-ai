@@ -424,6 +424,7 @@ class Miner(BaseMinerNeuron):
                     technical_quality=classification.technical_quality.value,
                     market_analysis=classification.market_analysis.value,
                     impact_potential=classification.impact_potential.value,
+                    relevance_confidence=classification.relevance_confidence,
                 )
 
             bt.logging.info(f"[Miner] Background: Finished processing articles, sending back to validator {validator_hotkey}")

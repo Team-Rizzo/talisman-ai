@@ -473,6 +473,7 @@ class NewsArticleAnalysisBase(BaseModel):
     technical_quality: Optional[str] = Field(None, alias="technicalQuality")
     market_analysis: Optional[str] = Field(None, alias="marketAnalysis")
     impact_potential: Optional[str] = Field(None, alias="impactPotential")
+    relevance_confidence: Optional[str] = Field(None, alias="relevanceConfidence")
 
     class Config:
         populate_by_name = True

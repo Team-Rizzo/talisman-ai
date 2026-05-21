@@ -620,15 +620,42 @@ def score_post_entry(entry: TweetWithAuthor, analyzer, k: int = 5, analysis_resu
 # ===== News Article Scoring =====
 
 SOURCE_CREDIBILITY = {
+    # Tier 1 — Wire services & papers of record
     "reuters": 1.0, "ap_news": 1.0, "bbc": 1.0, "financial_times": 1.0,
     "wsj": 1.0, "bloomberg": 1.0,
-    "economist": 0.9, "nytimes": 0.9,
-    "cnbc": 0.8, "guardian": 0.8, "politico": 0.8,
-    "washington_post": 0.8, "forbes": 0.8, "barrons": 0.8, "npr": 0.8,
+    # Tier 2 — Major broadsheets & established outlets
+    "economist": 0.9, "nytimes": 0.9, "washington_post": 0.9,
+    # Tier 3 — Respected broadcast/print with editorial depth
+    "cnbc": 0.8, "guardian": 0.8, "politico": 0.8, "npr": 0.8,
+    "forbes": 0.8, "barrons": 0.8, "abc_news": 0.8, "cbs_news": 0.8,
+    "nbc_news": 0.8, "cnn_finance": 0.8, "la_times": 0.8,
+    "usa_today": 0.8, "chicago_tribune": 0.8, "the_atlantic": 0.8,
+    # Tier 4 — Finance/market-focused & quality tech
     "techcrunch": 0.7, "ars_technica": 0.7, "wired": 0.7,
     "marketwatch": 0.7, "investopedia": 0.7, "nasdaq": 0.7,
-    "seeking_alpha": 0.7, "yahoo_finance": 0.7, "motley_fool": 0.6,
-    "benzinga": 0.6, "thestreet": 0.6, "zacks": 0.6,
+    "seeking_alpha": 0.7, "yahoo_finance": 0.7, "sp_global": 0.7,
+    "investing_com": 0.7, "business_insider": 0.7, "the_hill": 0.7,
+    "propublica": 0.7, "mit_tech_review": 0.7, "vox": 0.7,
+    # Tier 5 — Smaller finance/niche outlets
+    "motley_fool": 0.6, "benzinga": 0.6, "thestreet": 0.6, "zacks": 0.6,
+    "zero_hedge": 0.6, "engadget": 0.6, "gizmodo": 0.6,
+    # Tier 6 — Government/institutional sources (high trust, low volume)
+    "federal_reserve": 0.9, "sec": 0.9, "treasury": 0.9,
+    "brookings": 0.8, "nasa": 0.8, "cdc_newsroom": 0.8,
+    # Tier 7 — International outlets
+    "al_jazeera": 0.7, "france24": 0.7, "deutsche_welle": 0.7,
+    "scmp": 0.7, "nhk_world": 0.7, "japan_times": 0.6, "the_hindu": 0.6,
+    "le_monde": 0.7, "der_spiegel": 0.7, "kqed": 0.6,
+    # Tier 8 — Science/academic
+    "nature_news": 0.8, "scientific_american": 0.7, "new_scientist": 0.7,
+    "ieee_spectrum": 0.7, "science_daily": 0.6, "live_science": 0.6,
+    "space_com": 0.6,
+    # Tier 9 — Culture/niche (lower market relevance)
+    "rolling_stone": 0.5, "pitchfork": 0.4, "variety": 0.5,
+    "hollywood_reporter": 0.5, "artforum": 0.4, "scotusblog": 0.6,
+    "smithsonian": 0.6, "inside_climate": 0.6,
+    # Tier 10 — State media (lower editorial independence)
+    "rt_news": 0.4,
 }
 
 

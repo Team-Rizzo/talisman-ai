@@ -620,7 +620,14 @@ class Validator(BaseValidatorNeuron):
                 pass
 
             if not self._article_store.is_rewarded(article.id):
-                self._miner_reward.add_reward(miner_hotkey, 1)
+                content_len = len(article.content or "") if article.content else 0
+                if content_len >= 2000:
+                    weight = 3
+                elif content_len >= 500:
+                    weight = 2
+                else:
+                    weight = 1
+                self._miner_reward.add_reward(miner_hotkey, weight)
                 try:
                     self._article_store.mark_rewarded(article.id)
                 except Exception:
