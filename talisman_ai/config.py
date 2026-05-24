@@ -292,27 +292,31 @@ def _handle_reset_signals(data: dict) -> None:
 
     reset_epoch = data.get("reset_broadcasts_before_epoch", -1)
     purge_hotkeys = data.get("purge_broadcast_hotkeys", [])
+    reset_scores_id = data.get("reset_scores_id", "")
 
-    reset_id = f"epoch:{reset_epoch}|purge:{','.join(sorted(purge_hotkeys))}"
+    reset_id = f"epoch:{reset_epoch}|purge:{','.join(sorted(purge_hotkeys))}|scores:{reset_scores_id}"
     if reset_id in _applied_reset_ids:
         return
-    if reset_epoch < 0 and not purge_hotkeys:
+    if reset_epoch < 0 and not purge_hotkeys and not reset_scores_id:
         return
 
     _applied_reset_ids.add(reset_id)
-    _log_info(f"[REMOTE_CONFIG] Reset signal received: reset_epoch={reset_epoch}, purge_hotkeys={len(purge_hotkeys)}")
+    _log_info(f"[REMOTE_CONFIG] Reset signal received: reset_epoch={reset_epoch}, purge_hotkeys={len(purge_hotkeys)}, reset_scores_id={reset_scores_id}")
 
     # The actual reset is performed by the validation_client which has
     # access to the broadcast stores. We store the directives here.
     globals()["_pending_reset_epoch"] = reset_epoch
     globals()["_pending_purge_hotkeys"] = list(purge_hotkeys)
+    if reset_scores_id:
+        globals()["_pending_reset_scores"] = True
 
 
 def get_pending_resets() -> tuple:
     """
     Return and clear pending reset directives.
-    Returns (reset_epoch: int, purge_hotkeys: list[str]).
+    Returns (reset_epoch: int, purge_hotkeys: list[str], reset_scores: bool).
     """
     epoch = globals().pop("_pending_reset_epoch", -1)
     hotkeys = globals().pop("_pending_purge_hotkeys", [])
-    return epoch, hotkeys
+    reset_scores = globals().pop("_pending_reset_scores", False)
+    return epoch, hotkeys, reset_scores

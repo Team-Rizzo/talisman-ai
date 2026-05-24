@@ -3,6 +3,7 @@ import asyncio
 from typing import Any, Dict, List, Callable, Optional
 import httpx
 import bittensor as bt
+import numpy as np
 import time
 import random
 
@@ -228,7 +229,7 @@ class ValidationClient:
                 # ---- Periodic remote config refresh ----
                 try:
                     config.refresh_remote_config()
-                    reset_epoch, purge_hotkeys = config.get_pending_resets()
+                    reset_epoch, purge_hotkeys, reset_scores = config.get_pending_resets()
                     if reset_epoch >= 0:
                         bt.logging.info(f"[REMOTE_CONFIG] Flushing broadcast rewards for epochs <= {reset_epoch}")
                         self._validator._reward_broadcasts.flush_before_epoch(reset_epoch)
@@ -237,6 +238,10 @@ class ValidationClient:
                         bt.logging.info(f"[REMOTE_CONFIG] Purging broadcast data for {len(purge_hotkeys)} hotkeys")
                         self._validator._reward_broadcasts.purge_hotkeys(purge_hotkeys)
                         self._validator._penalty_broadcasts.purge_hotkeys(purge_hotkeys)
+                    if reset_scores:
+                        bt.logging.info("[REMOTE_CONFIG] Resetting validator scores to zero (signal from API)")
+                        self._validator.scores = np.zeros(self._validator.metagraph.n, dtype=np.float32)
+                        self._validator.save_state()
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] Remote config refresh error: {e}")
 
