@@ -85,7 +85,15 @@ class RewardBroadcastStore:
 
         last = int(self.last_seen_seq.get(sender, -1))
         if seq_i <= last:
-            return False, f"duplicate_or_old_seq(last={last}, got={seq_i})"
+            if last > 0 and seq_i < last // 10:
+                bt.logging.info(
+                    f"[BROADCAST] Resetting stale last_seen_seq for {sender[:12]}.. "
+                    f"(old={last}, new={seq_i}) — likely seq scheme change"
+                )
+                self.last_seen_seq[sender] = seq_i - 1
+                last = seq_i - 1
+            else:
+                return False, f"duplicate_or_old_seq(last={last}, got={seq_i})"
 
         cleaned = {int(uid): int(pts) for uid, pts in (uid_points or {}).items() if int(pts) > 0}
         if not cleaned:
