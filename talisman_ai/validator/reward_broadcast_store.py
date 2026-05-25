@@ -92,11 +92,6 @@ class RewardBroadcastStore:
                 )
                 self.last_seen_seq[sender] = seq_i - 1
                 last = seq_i - 1
-                stale_epochs = [e for e in self.by_epoch_by_sender if e > epoch_i * 2]
-                for e in stale_epochs:
-                    self.by_epoch_by_sender.pop(e, None)
-                if stale_epochs:
-                    bt.logging.info(f"[BROADCAST] Flushed {len(stale_epochs)} stale epochs from old scheme")
             else:
                 return False, f"duplicate_or_old_seq(last={last}, got={seq_i})"
 
@@ -109,6 +104,13 @@ class RewardBroadcastStore:
         # Store sender contribution for this epoch.
         self.by_epoch_by_sender.setdefault(epoch_i, {})[sender] = cleaned
         self.last_seen_seq[sender] = seq_i
+
+        # Flush epochs from a stale numbering scheme before pruning.
+        stale_epochs = [e for e in self.by_epoch_by_sender if e > epoch_i * 2]
+        if stale_epochs:
+            for e in stale_epochs:
+                self.by_epoch_by_sender.pop(e, None)
+            bt.logging.info(f"[BROADCAST] Flushed {len(stale_epochs)} stale epochs from old scheme")
 
         # Keep only the most recent N epochs.
         if self.keep_epochs > 0 and len(self.by_epoch_by_sender) > self.keep_epochs:
