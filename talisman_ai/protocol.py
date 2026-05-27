@@ -35,6 +35,12 @@ class Score(bt.Synapse):
     # Input set by validator - end block of the 100-block interval
     block_window_end: int
 
+    # Input set by validator - raw reward count for the epoch
+    rewards: int = 0
+
+    # Input set by validator - raw penalty count for the epoch
+    penalties: int = 0
+
     # Input set by validator - score for this hotkey in the 100-block interval
     score: float
 

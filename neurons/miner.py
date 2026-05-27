@@ -487,9 +487,12 @@ class Miner(BaseMinerNeuron):
         block_window_start = synapse.block_window_start
         block_window_end = synapse.block_window_end
         score = synapse.score
+        rewards = synapse.rewards
+        penalties = synapse.penalties
         validator_hotkey = synapse.validator_hotkey
         bt.logging.info(
-            f"[Score] Received score: {score:.6f} from validator {validator_hotkey} for block window {block_window_start}-{block_window_end}"
+            f"[Score] Epoch blocks {block_window_start}-{block_window_end}: {score:.0f} points"
+            f" ({rewards} rewards, {penalties} penalties) from validator {validator_hotkey}"
         )
         return synapse
 
