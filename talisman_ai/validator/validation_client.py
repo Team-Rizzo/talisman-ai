@@ -361,6 +361,7 @@ class ValidationClient:
                 combined_uid_rewards: Dict[int, int] = {}
 
                 # Local rewards to uid->points
+                local_rewards_map: Dict[str, int] = {}
                 try:
                     local_rewards_map = self._validator._miner_reward.get_rewards(epoch=target_epoch)
                     bt.logging.debug(f"[ValidationClient.run] Retrieved local_rewards_map: {local_rewards_map}")
