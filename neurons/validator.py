@@ -994,6 +994,11 @@ class Validator(BaseValidatorNeuron):
                 )
                 continue
 
+            try:
+                hotkey = self._tweet_store.get_hotkey(tweet.id)
+            except (KeyError, Exception):
+                hotkey = None
+
             completed_tweets.append(
                 CompletedTweetSubmission(
                     tweet_id=tweet.id,
@@ -1005,6 +1010,7 @@ class Validator(BaseValidatorNeuron):
                     market_analysis=tweet.analysis.market_analysis,
                     impact_potential=tweet.analysis.impact_potential,
                     relevance_confidence=getattr(tweet.analysis, "relevance_confidence", None),
+                    miner_hotkey=hotkey,
                 )
             )
         response = await self._validation_client.api_client.submit_completed_tweets(completed_tweets)
@@ -1021,6 +1027,11 @@ class Validator(BaseValidatorNeuron):
                 )
                 continue
 
+            try:
+                hotkey = self._telegram_store.get_hotkey(msg.id)
+            except (KeyError, Exception):
+                hotkey = None
+
             completed_messages.append(
                 CompletedTelegramMessageSubmission(
                     message_id=msg.id,
@@ -1032,6 +1043,7 @@ class Validator(BaseValidatorNeuron):
                     market_analysis=msg.analysis.market_analysis,
                     impact_potential=msg.analysis.impact_potential,
                     relevance_confidence=getattr(msg.analysis, "relevance_confidence", None),
+                    miner_hotkey=hotkey,
                 )
             )
         response = await self._validation_client.api_client.submit_completed_telegram_messages(completed_messages)
@@ -1047,6 +1059,11 @@ class Validator(BaseValidatorNeuron):
                 )
                 continue
 
+            try:
+                hotkey = self._article_store.get_hotkey(str(article.id))
+            except (KeyError, Exception):
+                hotkey = None
+
             completed_articles.append(
                 CompletedNewsArticleSubmission(
                     article_id=article.id,
@@ -1058,6 +1075,7 @@ class Validator(BaseValidatorNeuron):
                     market_analysis=article.analysis.market_analysis,
                     impact_potential=article.analysis.impact_potential,
                     relevance_confidence=getattr(article.analysis, "relevance_confidence", None),
+                    miner_hotkey=hotkey,
                 )
             )
         response = await self._validation_client.api_client.submit_completed_articles(completed_articles)
