@@ -139,13 +139,14 @@ class RewardBroadcastStore:
     # Remote reset helpers
     # ---------------------------------------------------------------------
     def flush_before_epoch(self, epoch: int) -> int:
-        """Remove all broadcast data for epochs <= epoch. Returns count of epochs removed."""
+        """Remove all broadcast data for epochs <= epoch and reset seq tracking. Returns count of epochs removed."""
         removed = 0
         for old_epoch in list(self.by_epoch_by_sender.keys()):
             if int(old_epoch) <= int(epoch):
                 del self.by_epoch_by_sender[old_epoch]
                 removed += 1
         if removed:
+            self.last_seen_seq.clear()
             self.save()
         return removed
 
