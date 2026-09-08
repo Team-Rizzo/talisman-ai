@@ -89,6 +89,19 @@ def _analyze(a, art):
     return assets, entities, narr
 
 
+# NOTE on hc-012 (triaged 2026-09-02). The failure message reads "ticker IT should be
+# EXCLUDED", which misdescribes what happens. IT is emitted as asset_name=GARTNER with
+# evidence span "GARTNER" — the extractor resolved the company, whose ticker is IT, and
+# removing the word Gartner from the article removes the asset. The common-word gate is
+# working: IT is on the acronym blocklist and is not matched as a bare word.
+#
+# What the case actually asks is whether a company named only as the source of a
+# statistic ("a survey by Gartner found...") is an asset of the article. The extractor
+# already answers partly: is_primary_subject=False. Whether it should be emitted at all
+# is a design question about sources versus subjects, not a defect in the gate.
+#
+# Left failing on purpose: it encodes an intent nobody has decided. Do not re-diagnose
+# it as an ambiguity-gate bug.
 def test_handcurated_targeted(analyzer):
     rows = [json.loads(l) for l in open(FIXTURE) if l.strip()]
     hard_failures = []   # bug-fix assertions that MUST hold

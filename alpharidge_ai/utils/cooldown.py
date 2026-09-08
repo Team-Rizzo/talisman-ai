@@ -108,17 +108,27 @@ class MinerCooldownTracker:
 
     # ---- In-flight tracking ----
 
+    def inflight_limit(self, hotkey: str) -> int:
+        """How many dispatches this miner may hold at once.
+
+        One definition, read by both the selector and the reservation. Keeping two
+        copies is how they came to disagree.
+        """
+        if self.ration_for(hotkey) is not None:
+            return max(1, int(self.batches_per_epoch(hotkey)))
+        if self._adaptive_active():
+            return max(1, int(math.floor(self._get_window(hotkey))))
+        return MAX_INFLIGHT_PER_MINER
+
     def try_acquire(self, hotkey: str) -> bool:
         """Returns True if the miner has capacity for another dispatch.
 
-        Static limit (``MAX_INFLIGHT_PER_MINER``) unless this is the adaptive tracker
-        and the flag is on, in which case the per-miner window governs.
+        Under an earned ration the limit is the ration, matching what dispatch
+        selection already allowed. Otherwise the adaptive window governs, or the static
+        cap. Selection and reservation must agree, or work is offered and then refused.
         """
         count = self._inflight.get(hotkey, 0)
-        if self._adaptive_active():
-            limit = max(1, int(math.floor(self._get_window(hotkey))))
-        else:
-            limit = MAX_INFLIGHT_PER_MINER
+        limit = self.inflight_limit(hotkey)
         if count >= limit:
             return False
         self._inflight[hotkey] = count + 1
@@ -141,12 +151,44 @@ class MinerCooldownTracker:
         """Current per-miner window sizes (for pilot metrics)."""
         return list(self._window.values())
 
+    def set_ration_source(self, source) -> None:
+        """Install a callable returning a UID's earned ration, in articles per epoch.
+
+        When set, it replaces the adaptive batch size: dispatch is then leased on what
+        a UID has actually delivered rather than on how many submissions were accepted.
+        """
+        self._ration_source = source
+
+    def ration_for(self, hotkey: str):
+        source = getattr(self, "_ration_source", None)
+        if source is None:
+            return None
+        try:
+            value = source(hotkey)
+        except Exception:
+            return None
+        return None if value is None else float(value)
+
     def batch_size(self, hotkey: str) -> int:
         """Per-miner batch size, clamped to [MIN, MAX]; baseline when disabled."""
+        ration = self.ration_for(hotkey)
+        if ration is not None:
+            return int(max(1, min(self._bs_max(), int(ration))))
         if not self._bs_active():
             return self._bs_base()
         bs = self._batch_size.get(hotkey, float(self._bs_base()))
         return int(max(self._bs_min(), min(self._bs_max(), int(bs))))
+
+    def batches_per_epoch(self, hotkey: str) -> int:
+        """How many batches a UID is eligible for this epoch.
+
+        A ration above one batch buys more batches rather than a larger one, so the
+        batch stays a size miners already handle.
+        """
+        ration = self.ration_for(hotkey)
+        if ration is None:
+            return 1
+        return max(1, int(math.ceil(ration / max(1, self._bs_max()))))
 
     def record_batch_valid(self, hotkey: str, latency_s: float) -> None:
         """Grow on an on-time valid return; hold on valid-but-slow. No-op when disabled."""

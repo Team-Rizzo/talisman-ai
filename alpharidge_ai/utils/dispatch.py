@@ -25,6 +25,21 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 
 def _slot_limit(tracker, hotkey: str) -> int:
+    """How many batches a UID may hold at once this tick.
+
+    Under earned rations the cap comes from what the UID has delivered, not from the
+    adaptive window, so a UID whose ration exceeds one batch can hold several.
+    """
+    # Only when a ration is actually in force. The source is installed at startup and
+    # returns None until its switch is published, so its presence says nothing.
+    ration = getattr(tracker, "ration_for", None)
+    if ration is not None and ration(hotkey) is not None:
+        return max(1, int(tracker.batches_per_epoch(hotkey)))
+    # Selection and reservation must reach the same number, so ask the tracker for its
+    # limit rather than reconstructing it from one of the inputs.
+    limit = getattr(tracker, "inflight_limit", None)
+    if limit is not None:
+        return max(1, int(limit(hotkey)))
     return max(1, int(tracker.window(hotkey)))
 
 

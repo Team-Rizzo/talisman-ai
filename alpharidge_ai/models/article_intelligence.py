@@ -22,7 +22,21 @@ from pydantic import BaseModel, Field
 # 1.1.0 adds the additive triage keys (`triage`, `proof_of_read`,
 # `triage_schema_version`) carried alongside the analysis payload. Not gated by
 # any validation tier, so miners and validators may run mixed versions.
-SCHEMA_VERSION = "1.1.0"
+# 1.2.0 adds per-claim and per-quote confidence, quote character offsets, and caps on
+# every extraction list. The new fields are optional at the model layer so submissions
+# on 1.1.0 still parse during the grace window; presence is enforced at the scoring
+# layer from the cutover block onward.
+SCHEMA_VERSION = "1.2.0"
+SCHEMA_VERSION_PREV = "1.1.0"
+
+# Caps on extraction lists. A submission is truncated to these, so reporting more
+# cannot buy a larger scoreable set.
+MAX_ASSETS = 40
+MAX_ENTITIES = 60
+MAX_ECONOMIC_DATA = 40
+MAX_NUMERIC_CLAIMS = 40
+MAX_QUOTES = 20
+MAX_CONTAGION_LINKS = 20
 
 
 # ============================================================================
@@ -468,6 +482,9 @@ class NumericClaim(BaseModel):
     context: Optional[str] = Field(None, max_length=200)
     is_percentage_change: bool = False
     comparison_period: Optional[str] = None
+    # Stated probability that this claim holds. Required from 1.2.0; None only during
+    # the grace window, where it is scored at a neutral constant.
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
 
     class Config:
         populate_by_name = True
@@ -481,6 +498,11 @@ class QuoteExtraction(BaseModel):
     text: str = Field(..., max_length=1000)
     sentiment: Sentiment = Sentiment.NEUTRAL
     is_market_moving: bool = False
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    # Character offsets of the quote in the served article text. The validator keys a
+    # quote by the span it finds itself, so these say where to look, not what counts.
+    start_offset: Optional[int] = Field(None, ge=0)
+    end_offset: Optional[int] = Field(None, ge=0)
 
     class Config:
         populate_by_name = True
@@ -669,22 +691,22 @@ class ArticleIntelligence(BaseModel):
     sentiment_direction: SentimentDirection
 
     # === Per-Asset Sentiment ===
-    assets: List[AssetSentiment] = Field(default_factory=list)
+    assets: List[AssetSentiment] = Field(default_factory=list, max_length=MAX_ASSETS)
 
     # === Named Entities ===
-    entities: List[ExtractedEntity] = Field(default_factory=list)
+    entities: List[ExtractedEntity] = Field(default_factory=list, max_length=MAX_ENTITIES)
 
     # === Economic Data Points ===
-    economic_data: List[EconomicDataPoint] = Field(default_factory=list)
+    economic_data: List[EconomicDataPoint] = Field(default_factory=list, max_length=MAX_ECONOMIC_DATA)
 
     # === Numeric Claims ===
-    numeric_claims: List[NumericClaim] = Field(default_factory=list)
+    numeric_claims: List[NumericClaim] = Field(default_factory=list, max_length=MAX_NUMERIC_CLAIMS)
 
     # === Quotes ===
-    quotes: List[QuoteExtraction] = Field(default_factory=list)
+    quotes: List[QuoteExtraction] = Field(default_factory=list, max_length=MAX_QUOTES)
 
     # === Cross-Market Contagion ===
-    contagion_links: List[ContagionLink] = Field(default_factory=list)
+    contagion_links: List[ContagionLink] = Field(default_factory=list, max_length=MAX_CONTAGION_LINKS)
 
     # === Chart Summary ===
     chart_summary: ChartSummary

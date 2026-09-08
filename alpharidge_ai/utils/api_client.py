@@ -380,6 +380,15 @@ class AlpharidgeAPIClient:
             "reason": reason, "evidence": evidence,
         })
 
+    async def post_controller_proposal(self, epoch: int, roi_ema: float,
+                                       direction: int, magnitude: float) -> Dict[str, Any]:
+        """Report that the capacity controller's step rule armed. Informational: a
+        proposal never moves capacity, only an operator publishing a profile does."""
+        return await self._request("POST", "/mechanism/proposal", json={
+            "epoch": int(epoch), "roi_ema": float(roi_ema),
+            "direction": int(direction), "magnitude": float(magnitude),
+        })
+
     async def post_reputation_snapshot(self, epoch: int, snapshots: list) -> Dict[str, Any]:
         """Push per-hotkey reputation rows for an epoch (display/monitoring only)."""
         return await self._request("POST", "/reputation/snapshot",

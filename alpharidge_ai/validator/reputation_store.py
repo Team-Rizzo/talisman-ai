@@ -37,6 +37,13 @@ def _prior() -> float:
 # one observation: (article_id, graded, weight)
 Obs = Tuple[int, float, float]
 
+# Defense-in-depth bounds on ingested observations. A sender broadcasts once per epoch
+# with seq == epoch, so a distant seq is a rogue or replayed payload; the volume caps
+# bound how much EMA movement one sender can buy in a single epoch.
+MAX_SEQ_EPOCH_SKEW = 100
+MAX_OBS_PER_TARGET = 512
+MAX_TARGETS_PER_SENDER = 1024
+
 
 @dataclass
 class ReputationStore:
@@ -48,6 +55,8 @@ class ReputationStore:
     # pending observations: epoch -> sender_hotkey -> target_hotkey -> [Obs]
     obs: Dict[int, Dict[str, Dict[str, List[Obs]]]] = field(default_factory=dict)
     finalized: List[int] = field(default_factory=list)
+    # highest accepted seq per sender
+    last_seen_seq: Dict[str, int] = field(default_factory=dict)
 
     def load(self) -> None:
         try:
@@ -57,6 +66,8 @@ class ReputationStore:
             self.state = {str(k): {"r": float(v["r"]), "n": int(v.get("n", 0))}
                           for k, v in (data.get("state") or {}).items()}
             self.finalized = [int(e) for e in (data.get("finalized") or [])][-64:]
+            self.last_seen_seq = {str(k): int(v)
+                                  for k, v in (data.get("last_seen_seq") or {}).items()}
             raw = data.get("obs") or {}
             self.obs = {int(e): {s: {t: [tuple(o) for o in lst] for t, lst in tgts.items()}
                                  for s, tgts in senders.items()}
@@ -70,6 +81,7 @@ class ReputationStore:
             "state": self.state,
             "finalized": self.finalized[-64:],
             "obs": self.obs,
+            "last_seen_seq": dict(self.last_seen_seq),
         }))
         tmp.replace(self.path)
 
@@ -85,13 +97,36 @@ class ReputationStore:
         """Own observation — buffered for aggregation and for broadcast (via export)."""
         self._add(epoch, self_hotkey, target, (article_id, graded, weight))
 
-    def ingest(self, sender: str, epoch: int, targets: Dict[str, List[Obs]]) -> None:
-        """A peer validator's observations for an epoch."""
-        if epoch in self.finalized:
-            return
-        for target, lst in (targets or {}).items():
-            for o in lst:
-                self._add(epoch, sender, target, o)
+    def ingest(self, sender: str, epoch: int, targets: Dict[str, List[Obs]],
+               seq: int = None) -> Tuple[bool, str]:
+        """A peer validator's observations for an epoch. Returns (accepted, reason)."""
+        sender = str(sender)
+        epoch_i = int(epoch)
+        if epoch_i in self.finalized:
+            return False, f"epoch_already_finalized({epoch_i})"
+
+        if seq is not None:
+            seq_i = int(seq)
+            if abs(seq_i - epoch_i) > MAX_SEQ_EPOCH_SKEW:
+                return False, f"seq_epoch_skew(seq={seq_i}, epoch={epoch_i})"
+            last = int(self.last_seen_seq.get(sender, -1))
+            if seq_i <= last:
+                return False, f"duplicate_or_old_seq(last={last}, got={seq_i})"
+            self.last_seen_seq[sender] = seq_i
+
+        targets = targets or {}
+        kept = 0
+        # Truncate rather than reject: one oversized target must not suppress the rest.
+        for target in sorted(targets)[:MAX_TARGETS_PER_SENDER]:
+            for o in (targets.get(target) or [])[:MAX_OBS_PER_TARGET]:
+                try:
+                    self._add(epoch_i, sender, str(target), o)
+                    kept += 1
+                except (TypeError, ValueError, IndexError):
+                    continue
+        if not kept:
+            return False, "empty_payload"
+        return True, f"accepted({kept})"
 
     def export(self, epoch: int, self_hotkey: str) -> Dict[str, List[Obs]]:
         """Own observations for `epoch`, to broadcast to peers."""
@@ -140,6 +175,13 @@ class ReputationStore:
 
     def samples(self, hotkey: str) -> int:
         return int(self.state.get(hotkey, {}).get("n", 0))
+
+    def sender_observations(self, epoch: int, sender: str) -> Dict[str, List[Obs]]:
+        """One sender's buffered observations for an epoch, by target."""
+        return dict((self.obs.get(int(epoch), {}) or {}).get(str(sender), {}))
+
+    def senders(self, epoch: int) -> List[str]:
+        return sorted((self.obs.get(int(epoch), {}) or {}).keys())
 
     def snapshot(self) -> Dict[str, Dict[str, float]]:
         """Per-hotkey {r, n} for telemetry / emission."""

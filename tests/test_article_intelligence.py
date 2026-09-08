@@ -1238,33 +1238,57 @@ class TestHybridValidationContract:
         assert S.TIER3_THRESHOLD == 0.70
 
     def test_threshold_gates_exactly_at_composite(self):
-        # Robust mechanism proof: the accept/reject boundary tracks TIER3_THRESHOLD.
-        import alpharidge_ai.analyzer.scoring as S
+        # The accept/reject boundary tracks the SERVED threshold. The module constant
+        # in scoring.py is only a fallback for when config cannot be read, so patching
+        # it proves nothing about what a validator actually does.
+        from alpharidge_ai import config as cfg
         miner, validator = self._noisy_miner(), _make_intel(narrative_keywords=["fed-policy"])
         _, comp, _ = validate_article_intelligence(miner, validator)
         assert comp < 1.0  # genuinely degraded
-        orig = S.TIER3_THRESHOLD
+        orig = getattr(cfg, "TIER3_THRESHOLD", None)
         try:
-            S.TIER3_THRESHOLD = round(comp - 0.02, 4)
+            cfg.TIER3_THRESHOLD = round(comp - 0.02, 4)
             ok_lo, _, _ = validate_article_intelligence(miner, validator)
-            S.TIER3_THRESHOLD = round(comp + 0.02, 4)
+            cfg.TIER3_THRESHOLD = round(comp + 0.02, 4)
             ok_hi, _, _ = validate_article_intelligence(miner, validator)
         finally:
-            S.TIER3_THRESHOLD = orig
+            if orig is not None:
+                cfg.TIER3_THRESHOLD = orig
         assert ok_lo and not ok_hi
 
     def test_recalibration_rescues_honest_noise_pair(self):
-        # A pair that the old 0.75 floor rejected but 0.70 accepts -> the whole point.
-        import alpharidge_ai.analyzer.scoring as S
+        # A pair the old 0.75 floor rejected but 0.70 accepts -> the whole point.
+        from alpharidge_ai import config as cfg
         miner, validator = self._noisy_miner(), _make_intel(narrative_keywords=["fed-policy"])
         _, comp, _ = validate_article_intelligence(miner, validator)
         assert 0.70 <= comp < 0.75, f"craft composite {comp} not in the recalibration band"
-        orig = S.TIER3_THRESHOLD
+        orig = getattr(cfg, "TIER3_THRESHOLD", None)
         try:
-            S.TIER3_THRESHOLD = 0.70
+            cfg.TIER3_THRESHOLD = 0.70
             ok_new, _, _ = validate_article_intelligence(miner, validator)
-            S.TIER3_THRESHOLD = 0.75
+            cfg.TIER3_THRESHOLD = 0.75
             ok_old, _, _ = validate_article_intelligence(miner, validator)
         finally:
-            S.TIER3_THRESHOLD = orig
+            if orig is not None:
+                cfg.TIER3_THRESHOLD = orig
         assert ok_new and not ok_old
+
+    def test_the_served_threshold_is_what_gates(self):
+        """The module constant is a fallback, not the value in force. A test that
+        patches it passes or fails for reasons unrelated to what validators do."""
+        from alpharidge_ai import config as cfg
+        import alpharidge_ai.analyzer.scoring as S
+        miner, validator = self._noisy_miner(), _make_intel(narrative_keywords=["fed-policy"])
+        _, comp, _ = validate_article_intelligence(miner, validator)
+
+        orig_cfg = getattr(cfg, "TIER3_THRESHOLD", None)
+        orig_mod = S.TIER3_THRESHOLD
+        try:
+            cfg.TIER3_THRESHOLD = round(comp - 0.02, 4)   # served: accept
+            S.TIER3_THRESHOLD = round(comp + 0.02, 4)     # module: would reject
+            accepted, _, _ = validate_article_intelligence(miner, validator)
+        finally:
+            if orig_cfg is not None:
+                cfg.TIER3_THRESHOLD = orig_cfg
+            S.TIER3_THRESHOLD = orig_mod
+        assert accepted, "the served value must win over the module fallback"

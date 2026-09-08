@@ -281,11 +281,11 @@ def test_activation_block_in_the_past_still_applies(monkeypatch):
 
 def test_window_keys_are_marked_as_consensus_keys():
     """A local OVERRIDE_ on these is a weight split no config push can correct."""
-    assert config._CONSENSUS_KEYS == {
+    assert {
         "WEIGHT_WINDOW_EPOCHS",
         "WEIGHT_WINDOW_EPOCHS_PREV",
         "WEIGHT_WINDOW_ACTIVE_BLOCK",
-    }
+    } <= config._CONSENSUS_KEYS
     for key in config._CONSENSUS_KEYS:
         assert key in config._REMOTE_CONFIG_KEYS
 
@@ -370,7 +370,9 @@ def _client_with(monkeypatch, reward_store, reward_broadcasts, multiplier=0.5):
     validator._miner_penalty = reward_store
     validator._reward_broadcasts = reward_broadcasts
     validator._penalty_broadcasts = FixedBroadcasts()
-    validator._reputation_store = type("R", (), {"reputation": lambda self, hk: 0.9})()
+    validator._reputation_store = type(
+        "R", (), {"reputation": lambda self, hk: 0.9,
+                  "samples": lambda self, hk: 1000})()
 
     client = object.__new__(vc.ValidationClient)
     client._validator = validator

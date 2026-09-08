@@ -112,6 +112,12 @@ def get_alpha_per_point():
         _reset_subtensor()
         raise 
 
+def alpha_usd() -> float:
+    """One alpha in USD, from the same on-chain source the weight path reads."""
+    sub = _get_subtensor()
+    return sub.get_subnet_price(netuid=45).tao * tao_price()
+
+
 def get_storage_value(module: str, storage_fn: str, params=None) -> Any:
     cache_key = (module, storage_fn, tuple(params) if params else ())
     now = time.time()

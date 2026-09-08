@@ -40,9 +40,18 @@ def gate(reputation, midpoint=MIDPOINT, gain=GAIN):
 
 
 def emission(reputation, midpoint=MIDPOINT, gain=GAIN,
-             bonus_ceiling=0.0, bonus_start=0.63, bonus_full=0.75):
+             bonus_ceiling=0.0, bonus_start=0.63, bonus_full=0.75,
+             n=None, n_min=0):
     """Emission multiplier: gate() times a bonus ramp above 1.0 between bonus_start and
-    bonus_full. bonus_ceiling == 0 reproduces gate() exactly."""
+    bonus_full. bonus_ceiling == 0 reproduces gate() exactly.
+
+    While a hotkey holds fewer than `n_min` observations the multiplier is neutral 1.0.
+    Too few samples is not evidence of bad work, and at a steep gain the cold-start
+    prior sits far below the midpoint, so scoring it would read absence as failure.
+    Pass n=None (or n_min=0) to disable the rule.
+    """
+    if n is not None and n_min > 0 and int(n) < int(n_min):
+        return 1.0
     floor = gate(reputation, midpoint, gain)
     denom = bonus_full - bonus_start
     if denom <= 1e-9:

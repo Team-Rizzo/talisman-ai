@@ -34,7 +34,7 @@ class GradedScorer:
             self.rarity.save()
             self._since_save = 0
         art = {"title": getattr(article, "title", None), "content": getattr(article, "content", None)}
-        g = quality.graded_score(sub, ref, art, self.emb, self.rarity.weights(), self.faith)
+        g = quality.graded_score(sub, ref, art, self.emb, self.rarity.weights())
         w = config.SAMPLING_SUBSTANTIVE_WEIGHT if _substantive(ref) else 1.0
         return g, w
 

@@ -18,8 +18,11 @@ from alpharidge_ai.protocol import ValidatorPenalties
 from alpharidge_ai.protocol import ValidatorReputationObs
 from alpharidge_ai.protocol import Score
 from alpharidge_ai.validator import reputation
+from alpharidge_ai.validator import emission_params
 from alpharidge_ai.utils.validators import get_validator_hotkeys
 from alpharidge_ai.validator import deep_verify
+from alpharidge_ai.consensus import overlap_audit
+from alpharidge_ai.mechanism import settlement
 
 class ValidationClient:
     """
@@ -70,6 +73,123 @@ class ValidationClient:
         # Exponential backoff state for API errors
         self._consecutive_errors = 0
         self._max_backoff_seconds = 300  # Max 5 minutes between retries
+
+    async def _run_capacity_controller(self, epoch: int) -> None:
+        """Measure the return, and report a step when the rule arms.
+
+        Reporting is informational by design: capacity moves when an operator publishes
+        a profile carrying the new value, so there is no path from here to anyone's pay.
+        """
+        ctrl = getattr(self._validator, "_capacity_controller", None)
+        if ctrl is None:
+            return
+        profile = self._validator._mechanism_profile.resolve(int(self._validator.block))
+        if profile is None:
+            return
+
+        proposal = ctrl.observe(epoch, profile)
+        if proposal is None:
+            return
+        try:
+            await self.api_client.post_controller_proposal(
+                epoch=epoch, roi_ema=proposal.roi_ema, direction=proposal.direction,
+                magnitude=abs(proposal.to_capacity / proposal.from_capacity - 1.0))
+        except Exception as e:
+            bt.logging.warning(f"[CONTROLLER] Could not report the step: {e}")
+
+    def _weights_for(self, rewards, window_blocks: int, context: str):
+        """The weight vector to set, from whichever settlement is in force.
+
+        Under the capacity formula a point pays E/C until the subnet's work reaches
+        capacity, and the remainder burns. The legacy path prices points in USD and
+        carries a floor and a rescale above 100%; both are gone here.
+        """
+        profile = self._validator._mechanism_profile.resolve(int(self._validator.block))
+        if profile is None or not profile.settlement.live:
+            return calculate_weights(rewards, self._validator.metagraph,
+                                     window_blocks, context=context)
+
+        # Capacity is points per epoch; the rewards span the whole weight window. The
+        # legacy path divides by the window too. Comparing a window total against one
+        # epoch of capacity would make burn a function of window length rather than of
+        # work, so capacity is scaled to the same span.
+        epochs = max(1.0, float(window_blocks) / float(config.BLOCK_LENGTH))
+        work = {r.hotkey: float(r.reward) for r in (rewards or [])}
+        result = settlement.settle(work, profile.settlement.C * epochs)
+        hotkeys = list(self._validator.metagraph.hotkeys)
+        size = int(getattr(self._validator.metagraph, "n", len(hotkeys)))
+        vector = settlement.weight_vector(result.shares, result.burn, hotkeys,
+                                          int(config.BURN_UID), size)
+        bt.logging.info(
+            f"[SETTLEMENT] live W={result.work:.0f} C={result.capacity:.0f} "
+            f"({epochs:.0f} epochs) burn={result.burn:.4f} paid={result.paid:.4f} "
+            f"{context}")
+        return np.array(vector, dtype=np.float64)
+
+    def _shadow_settlement(self, rewards, live_weights, epoch: int,
+                           window_blocks: int = None) -> None:
+        """Compute what the capacity formula would pay, and log the difference.
+
+        Log-only. Weights on chain still come from the live path; this exists so the
+        two can be compared over a full window before either is switched.
+        """
+        try:
+            profile = self._validator._mechanism_profile.resolve(int(self._validator.block))
+            if profile is None or profile.settlement.live:
+                return
+
+            # The same populated span the live path used. The configured window can be
+            # wider than the epochs actually present, and scaling by it would report a
+            # burn that the live calculation never saw.
+            epochs = (max(1.0, float(window_blocks) / float(config.BLOCK_LENGTH))
+                      if window_blocks
+                      else float(max(1, config.weight_window_epochs(self._validator.block))))
+            work = {r.hotkey: float(r.reward) for r in (rewards or [])}
+            result = settlement.settle(work, profile.settlement.C * epochs)
+
+            hotkeys = list(self._validator.metagraph.hotkeys)
+            shadow = settlement.weight_vector(result.shares, result.burn, hotkeys,
+                                              int(config.BURN_UID), len(live_weights))
+            live_burn = float(live_weights[int(config.BURN_UID)]) if len(live_weights) > int(config.BURN_UID) else 0.0
+            deltas = [abs(float(a) - float(b)) for a, b in zip(live_weights, shadow)]
+
+            bt.logging.info(
+                f"[SETTLEMENT] epoch={epoch} W={result.work:.0f} C={result.capacity:.0f} "
+                f"burn={result.burn:.4f} live_burn={live_burn:.4f} "
+                f"paid={result.paid:.4f} max_weight_delta={max(deltas or [0.0]):.6f} (shadow)")
+        except Exception as e:
+            bt.logging.debug(f"[SETTLEMENT] shadow failed: {e}")
+
+    def _overlap_audit(self, epoch: int) -> None:
+        """Check each peer's scores against ours on the articles we both graded.
+
+        Keyed selection means two validators no longer grade identical sets, so
+        agreement is measured on the intersection.
+        """
+        store = getattr(self._validator, "_reputation_store", None)
+        if store is None:
+            return
+        self_hk = str(self._validator.wallet.hotkey.ss58_address)
+        mine = overlap_audit.flatten(store.sender_observations(epoch, self_hk))
+        if not mine:
+            return
+
+        for sender in store.senders(epoch):
+            if sender == self_hk:
+                continue
+            theirs = overlap_audit.flatten(store.sender_observations(epoch, sender))
+            verdict = overlap_audit.assess(mine, theirs)
+            if not verdict.comparable:
+                bt.logging.debug(
+                    f"[OVERLAP] {sender[:12]}.. epoch={epoch} {verdict.reason}")
+            elif verdict.flagged:
+                bt.logging.warning(
+                    f"[OVERLAP] {sender[:12]}.. epoch={epoch} overlap={verdict.overlap} "
+                    f"{verdict.reason} (log-only)")
+            else:
+                bt.logging.info(
+                    f"[OVERLAP] {sender[:12]}.. epoch={epoch} overlap={verdict.overlap} "
+                    f"{verdict.reason}")
 
     # ---- Display-only penalty attribution (decoupled from consensus) ----
 
@@ -291,6 +411,9 @@ class ValidationClient:
         # validator has to pick the same one.
         rewards = []
         rep_gating = getattr(config, "REPUTATION_GATING_ENABLED", False)
+        params = emission_params.resolve(
+            self._validator._mechanism_profile.resolve(int(self._validator.block))
+            if hasattr(self._validator, "_mechanism_profile") else None)
         bt.logging.debug(f"[ValidationClient] Building rewards list, penalty_totals: {uid_penalty_totals}")
         for uid, pts in combined_uid_rewards.items():
             try:
@@ -300,16 +423,13 @@ class ValidationClient:
                 continue
             if rep_gating:
                 r = self._validator._reputation_store.reputation(hk)
-                g = reputation.emission(
-                    r,
-                    getattr(config, "EMISSION_MIDPOINT", 0.59),
-                    getattr(config, "EMISSION_GAIN", 100.0),
-                    getattr(config, "EMISSION_BONUS_CEILING", 0.0),
-                    getattr(config, "EMISSION_BONUS_START", 0.63),
-                    getattr(config, "EMISSION_BONUS_FULL", 0.75),
-                )
+                n = self._validator._reputation_store.samples(hk)
+                n_min = params.n_min
+                g = reputation.emission(r, *params.as_args(), n=n, n_min=n_min)
                 val = int(round(g * int(pts)))
-                info(f"[REWARDS] UID={uid} hk={hk[:12]}.. gated={val} (rep={r:.3f} mult={g:.3f} vol={pts})")
+                held = " neutral(under-observed)" if n_min > 0 and n < n_min else ""
+                info(f"[REWARDS] UID={uid} hk={hk[:12]}.. gated={val} "
+                     f"(rep={r:.3f} n={n} mult={g:.3f} vol={pts}){held}")
                 rewards.append(Reward(hotkey=hk, reward=val, epoch=target_epoch))
                 continue
             pen = uid_penalty_totals.get(uid, 0)
@@ -590,6 +710,16 @@ class ValidationClient:
                 except Exception as e:
                     bt.logging.debug(f"[ValidationClient.run] Failed to persist article store: {e}")
 
+                # ---- Periodic mechanism profile refresh ----
+                try:
+                    profile_client = getattr(self._validator, "_mechanism_profile", None)
+                    if profile_client is not None:
+                        block = int(self._validator.block)
+                        profile_client.refresh(block)
+                        profile_client.resolve(block)
+                except Exception as e:
+                    bt.logging.debug(f"[PROFILE] refresh failed: {e}")
+
                 # ---- Periodic remote config refresh ----
                 try:
                     config.refresh_remote_config()
@@ -765,17 +895,24 @@ class ValidationClient:
                         bt.logging.debug(f"[REPUTATION] finalize failed: {e}")
                     if int(target_epoch) != getattr(self, "_last_rep_snapshot_epoch", -1):
                         try:
-                            mid = getattr(config, "EMISSION_MIDPOINT", 0.59)
-                            gain = getattr(config, "EMISSION_GAIN", 100.0)
-                            b_ceil = getattr(config, "EMISSION_BONUS_CEILING", 0.0)
-                            b_start = getattr(config, "EMISSION_BONUS_START", 0.63)
-                            b_full = getattr(config, "EMISSION_BONUS_FULL", 0.75)
+                            p = emission_params.resolve(
+                                self._validator._mechanism_profile.resolve(
+                                    int(self._validator.block)))
+                            n_min = p.n_min
                             snap = self._validator._reputation_store.snapshot()
+                            median = emission_params.live_median(snap, n_min)
+                            if median is not None:
+                                bt.logging.info(
+                                    f"[EMISSION] {p.source} midpoint={p.midpoint:.3f} "
+                                    f"gain={p.gain:.1f} ceiling={p.ceiling:.2f} "
+                                    f"live_median={median:.3f} "
+                                    f"drift={median - p.midpoint:+.3f}")
                             # display-only, decoupled from consensus.
                             rows = [{"miner_hotkey": hk, "reputation": float(st.get("r", 0.5)),
                                      "samples": int(st.get("n", 0)),
-                                     "gate": reputation.emission(float(st.get("r", 0.5)), mid, gain,
-                                                                 b_ceil, b_start, b_full)}
+                                     "gate": reputation.emission(
+                                         float(st.get("r", 0.5)), *p.as_args(),
+                                         n=int(st.get("n", 0)), n_min=n_min)}
                                     for hk, st in snap.items()]
                             if rows:
                                 await self.api_client.post_reputation_snapshot(int(target_epoch), rows)
@@ -808,11 +945,11 @@ class ValidationClient:
                             f"present={present_epochs}/{window_k} "
                             f"uid_rekey_skipped={uid_rekey_skipped} "
                         )
-                        weights = calculate_weights(
-                            rewards, self._validator.metagraph, window_blocks, context=context
-                        )
+                        weights = self._weights_for(rewards, window_blocks, context)
                         bt.logging.debug(f"[ValidationClient.run] Updating scores with new weights")
                         self._validator.update_scores(weights, self._validator.metagraph.uids.tolist())
+                        self._shadow_settlement(rewards, weights, int(target_epoch),
+                                                window_blocks)
                         self._last_weight_epoch = target_epoch
                         self._log_shadow_window(target_epoch)
 
@@ -851,6 +988,18 @@ class ValidationClient:
                                 bt.logging.debug(f"[DEEP_VERIFY] fetch/recompute failed for {sender[:12]}..: {e}")
                     except Exception as e:
                         bt.logging.debug(f"[DEEP_VERIFY] pass failed: {e}")
+
+                    # Overlap audit: compare a sender against us on the articles both
+                    # of us graded.
+                    try:
+                        self._overlap_audit(int(target_epoch))
+                    except Exception as e:
+                        bt.logging.debug(f"[OVERLAP] pass failed: {e}")
+
+                    try:
+                        await self._run_capacity_controller(int(target_epoch))
+                    except Exception as e:
+                        bt.logging.debug(f"[CONTROLLER] pass failed: {e}")
                     finally:
                         self._last_deep_verify_epoch = target_epoch
 

@@ -65,6 +65,10 @@ from alpharidge_ai.protocol import ValidatorReputationObs
 from alpharidge_ai.analyzer.scoring import validate_miner_batch, validate_miner_telegram_batch, validate_miner_article_batch, validate_miner_article_intelligence_batch, classify_article_batch_failure
 from alpharidge_ai.validator.reputation_store import ReputationStore
 from alpharidge_ai.validator.reputation import emission as _rep_emission
+from alpharidge_ai.validator import emission_params
+from alpharidge_ai.validator.profile_client import ProfileClient
+from alpharidge_ai.market.ration_store import RationStore
+from alpharidge_ai.validator.capacity_controller import CapacityController
 from alpharidge_ai.triage import TRIAGE_SCHEMA_VERSION, gazetteer_assets
 from alpharidge_ai.models.article_intelligence import SCHEMA_VERSION
 from alpharidge_ai.utils.api_models import NewsArticleAnalysisBase
@@ -134,7 +138,25 @@ class Validator(BaseValidatorNeuron):
 
         self._reputation_store = ReputationStore()
         self._reputation_store.load()
+
+        # Mechanism profile: every economic value resolves from here, by block height.
+        # Nothing reads it yet; it is fetched and logged so activation can be observed
+        # before anything depends on it.
+        self._mechanism_profile = ProfileClient()
+        self._mechanism_profile.load()
+
+        # Earned rations. Local to this validator and never broadcast. Shadow only:
+        # observed and logged beside today's batch size, which still drives dispatch.
+        self._ration_store = RationStore()
+        self._ration_store.load()
+
+        # Capacity controller. Measures the return and reports a step when the rule
+        # arms; capacity itself only ever moves by a published profile.
+        self._capacity_controller = CapacityController()
+        self._capacity_controller.load()
         self._graded_scorer = None  # lazy; built on first use when scoring is served on
+        self._auditor = None        # lazy; built on first use when shadow auditing is on
+        self._ration_plan = {}      # this tick's rations; empty leaves dispatch as-is
         # Transient per-item verdict metadata (resource_id -> {miner_signature, nonce,
         # validator_verdict, epoch}); populated during validation, drained at submission.
         self._verdict_meta = {}
@@ -172,6 +194,7 @@ class Validator(BaseValidatorNeuron):
         # Article tracker is the only adaptive one (RFC 2026-06-28); tweet/telegram
         # stay static. Behaves identically to static until ADAPTIVE_DISPATCH_ENABLED.
         self._article_cooldown = MinerCooldownTracker(adaptive=True)
+        self._article_cooldown.set_ration_source(self._ration_for)
         # Liveness roster (adaptive dispatch). Populated off the dispatch path;
         # only consulted for selection once ADAPTIVE_DISPATCH_ENABLED is on.
         self._liveness = LivenessRoster()
@@ -771,6 +794,103 @@ class Validator(BaseValidatorNeuron):
             collect_verdict_meta(message_batch, miner_signatures, nonces, "valid", current_epoch))
         return True
 
+    def _get_auditor(self):
+        """The keyed auditor, built on first use.
+
+        Built whenever the oracle is live, whatever the local shadow flag says. The
+        flag only decides whether to run the audit *before* the oracle goes live; once
+        it is live the audit is the reputation source, and letting a local flag suppress
+        it would stop reputation moving at all.
+        """
+        if not (getattr(config, "AUDIT_SHADOW_ENABLED", False) or self._oracle_is_live()):
+            return None
+        if self._auditor is None:
+            from alpharidge_ai.oracle import audit_key
+            from alpharidge_ai.oracle.grader import Grader
+            from alpharidge_ai.oracle.runner import Auditor
+            self._auditor = Auditor(audit_key.load(),
+                                    self._mechanism_profile.resolve,
+                                    grader=Grader())
+            bt.logging.info("[AUDIT] shadow auditing enabled")
+        return self._auditor
+
+    def _oracle_is_live(self):
+        """Whether audit observations feed reputation, replacing the old scorer's."""
+        profile = self._mechanism_profile.resolve(int(self.block))
+        return bool(profile.oracle.live) if profile else False
+
+    def _log_audit(self, miner_hotkey, observations, live=False):
+        """Log what the audit saw, and record it once the oracle is live.
+
+        Until then this only logs. An observation reaching the store propagates
+        fleet-wide within an epoch and cannot be undone.
+        """
+        for obs in observations or []:
+            bt.logging.info(
+                f"[AUDIT] hk={miner_hotkey[:12]}.. id={obs.article_id} "
+                f"path={obs.path} score={obs.score:.3f} w={obs.weight:.2f} "
+                f"model={obs.grader_model} {obs.detail}"
+                f"{'' if live else ' (shadow)'}")
+        if live and observations:
+            self._record_observations(
+                miner_hotkey,
+                [(o.article_id, float(o.score), float(o.weight)) for o in observations])
+
+    def _ration_for(self, hotkey):
+        """This UID's earned ration for the current epoch, or None to leave dispatch
+        on the adaptive batch size."""
+        profile = self._mechanism_profile.resolve(int(self.block))
+        if profile is None or not profile.rations.dispatch:
+            return None
+        plan = self._ration_plan
+        return plan.get(hotkey) if plan else None
+
+    def _refresh_ration_plan(self, hotkeys, supply):
+        """Split the articles available this tick across UIDs, once, before slicing."""
+        try:
+            profile = self._mechanism_profile.resolve(int(self.block))
+            if profile is None or not profile.rations.dispatch:
+                self._ration_plan = {}
+                return
+            epoch = int(self._miner_reward._get_current_epoch())
+            self._ration_plan = self._ration_store.plan(
+                list(hotkeys), epoch=epoch, supply=float(supply), profile=profile)
+        except Exception as e:
+            bt.logging.debug(f"[RATION] plan failed: {e}")
+            self._ration_plan = {}
+
+    def _observe_ration(self, miner_hotkey, article_batch, floor_results):
+        """Fold a batch outcome into the ration state and log what it would lease.
+
+        Growth keys on work that cleared the floor, never on what was submitted or on
+        how many slots were held. Shadow only: nothing here changes dispatch yet.
+        """
+        try:
+            profile = self._mechanism_profile.resolve(int(self.block))
+            if profile is None:
+                return
+            # Only an explicit pass counts, and only articles the floor actually
+            # judged are treated as dispatched. An unknown outcome advances nothing:
+            # standing moves on validated work or it does not move.
+            judged = [a for a in (article_batch or [])
+                      if int(getattr(a, "id", -1)) in floor_results]
+            dispatched = len(judged)
+            if not dispatched:
+                return
+            validated = sum(1 for a in judged
+                            if floor_results.get(int(a.id)) is True)
+            epoch = int(self._miner_reward._get_current_epoch())
+            self._ration_store.observe(miner_hotkey, epoch=epoch, validated=validated,
+                                       dispatched=dispatched, profile=profile)
+
+            state = self._ration_store.book.states.get(miner_hotkey)
+            bt.logging.info(
+                f"[RATION] hk={miner_hotkey[:12]}.. validated={validated}/{dispatched} "
+                f"ema={state.ema:.2f} batch_size={self._article_cooldown.batch_size(miner_hotkey)} "
+                f"(shadow)")
+        except Exception as e:
+            bt.logging.debug(f"[RATION] observe failed: {e}")
+
     def _get_graded_scorer(self):
         if self._graded_scorer is None:
             from alpharidge_ai.validator.graded_scorer import GradedScorer
@@ -1267,6 +1387,24 @@ class Validator(BaseValidatorNeuron):
                 triage_res.borderline_valuable_ids)
             track_batch = [a for a in article_batch if int(a.id) in deep_ids]
 
+        # Resolved once, before the branches: the triage path below reads it too, and
+        # binding it inside one branch would leave it undefined on the others.
+        _profile = self._mechanism_profile.resolve(int(self.block))
+        oracle_live = self._oracle_is_live()
+        # The old scorer stands down only when something is actually replacing it. A
+        # published flip with no working auditor must not leave reputation unfed.
+        try:
+            audit_supersedes = oracle_live and self._get_auditor() is not None
+        except Exception as e:
+            # Building it can fail on a missing key or a bad dependency. The point of
+            # the fallback is that reputation keeps moving when it does.
+            bt.logging.error(f"[AUDIT] could not build the auditor: {e}")
+            audit_supersedes = False
+        if oracle_live and not audit_supersedes:
+            bt.logging.error(
+                "[AUDIT] oracle.live is published but no auditor could be built; "
+                "keeping the existing scorer so reputation still moves")
+
         # Try V2 validation if miner submitted analysis_data
         has_v2 = any(
             getattr(a.analysis, "analysis_data", None)
@@ -1284,11 +1422,19 @@ class Validator(BaseValidatorNeuron):
                 validate_miner_article_intelligence_batch,
                 track_batch, self._article_intel_analyzer, sample_size, None, gscorer,
                 reference_by_id, miner_hotkey,
+                (self._auditor if audit_supersedes or self._auditor else None),
+                int(self.block),
+                (_profile.oracle.schema_cutover_block if _profile else 0),
             )
+            self._log_audit(miner_hotkey,
+                            (validation_result or {}).get("audit_observations"),
+                            live=oracle_live)
             if gscorer is not None:
                 # Merged with triage grades below when grading succeeded
                 # (first-obs-wins dedup in the reputation store).
-                if not triage_active:
+                if not triage_active and not audit_supersedes:
+                    # Replaced, not supplemented: the audit measures the same thing
+                    # against the article rather than against our own re-run.
                     self._record_observations(
                         miner_hotkey, (validation_result or {}).get("observations") or [])
                 # Faithfulness cooldown update (min over sampled articles).
@@ -1324,7 +1470,7 @@ class Validator(BaseValidatorNeuron):
                         update={"analysis": None})
             self._record_triage_observations(
                 miner_hotkey, triage_res, article_batch,
-                (validation_result or {}).get("observations") or [],
+                [] if audit_supersedes else ((validation_result or {}).get("observations") or []),
                 allow_clean=full_push)
 
         if not is_valid:
@@ -1424,6 +1570,15 @@ class Validator(BaseValidatorNeuron):
                                        {int(a.id): a for a in sent_batch},
                                        full_push=full_push)
         else:
+            floor_results = (validation_result or {}).get("floor_results") or {}
+            floor_gating = bool(_profile.settlement.floor_gating) if _profile else False
+            floor_failed = [aid for aid, ok in floor_results.items() if not ok]
+            if floor_failed:
+                bt.logging.info(
+                    f"[FLOOR] hk={miner_hotkey} failed={len(floor_failed)}/"
+                    f"{len(floor_results)} gating={'on' if floor_gating else 'shadow'}")
+            self._observe_ration(miner_hotkey, article_batch, floor_results)
+
             for article in article_batch:
                 if self._canary_pool.label_of(int(article.id)) is not None:
                     # Canaries are graded only, in every lane and era.
@@ -1443,6 +1598,10 @@ class Validator(BaseValidatorNeuron):
                     pass
 
                 if not self._article_store.is_rewarded(article.id):
+                    if floor_gating and floor_results.get(int(article.id)) is False:
+                        # Cleared validation as part of the batch, but this article did
+                        # not clear the floor on its own, so it earns nothing.
+                        continue
                     content_len = len(article.content or "") if article.content else 0
                     if content_len >= 2000:
                         weight = 3
@@ -1545,6 +1704,8 @@ class Validator(BaseValidatorNeuron):
         bt.logging.info(f"[VALIDATION] Processing {len(articles)} articles in batch")
         for article in articles:
             self._article_store.add_article(article, set_as_processing=False, overwrite=False)
+        # Split what is available across UIDs once, before anything is sliced.
+        self._refresh_ration_plan(list(self.metagraph.hotkeys), len(articles))
         cooled_hotkeys = self._article_cooldown.get_cooled_down_hotkeys()
         cooled_uids = [
             uid for uid in range(self.metagraph.n.item())
@@ -1682,13 +1843,10 @@ class Validator(BaseValidatorNeuron):
         # Per-miner reputation emission multiplier (display-only): ~0 below the cliff, ~1
         # cleared, up to ~1.3 with the bonus. None when reputation scoring is off.
         rep_on = getattr(config, "REPUTATION_SCORING_ENABLED", False)
-        _em_args = (
-            getattr(config, "EMISSION_MIDPOINT", 0.59),
-            getattr(config, "EMISSION_GAIN", 100.0),
-            getattr(config, "EMISSION_BONUS_CEILING", 0.0),
-            getattr(config, "EMISSION_BONUS_START", 0.63),
-            getattr(config, "EMISSION_BONUS_FULL", 0.75),
-        )
+        _params = emission_params.resolve(
+            self._mechanism_profile.resolve(int(self.block)))
+        _em_args = _params.as_args()
+        _n_min = _params.n_min
         rows = []
         for hk in (set(ct) | live_hks):
             st = ct.get(hk, {})
@@ -1696,7 +1854,9 @@ class Validator(BaseValidatorNeuron):
             if rep_on:
                 try:
                     r = self._reputation_store.reputation(hk)
-                    emission_mult = round(float(_rep_emission(r, *_em_args)), 3)
+                    n = self._reputation_store.samples(hk)
+                    emission_mult = round(
+                        float(_rep_emission(r, *_em_args, n=n, n_min=_n_min)), 3)
                 except Exception:
                     emission_mult = None
             rows.append({
@@ -2388,11 +2548,17 @@ class Validator(BaseValidatorNeuron):
         try:
             sender = synapse.dendrite.hotkey
             targets = {t: [tuple(o) for o in lst] for t, lst in (synapse.observations or {}).items()}
-            self._reputation_store.ingest(sender, int(synapse.epoch), targets)
+            accepted, reason = self._reputation_store.ingest(
+                sender, int(synapse.epoch), targets, seq=int(synapse.seq))
             self._reputation_store.save()
-            bt.logging.info(
-                f"[REPUTATION_BROADCAST] Ingested from {sender[:12]}.. "
-                f"epoch={synapse.epoch} targets={len(targets)}")
+            if accepted:
+                bt.logging.info(
+                    f"[REPUTATION_BROADCAST] Ingested from {sender[:12]}.. "
+                    f"epoch={synapse.epoch} targets={len(targets)} {reason}")
+            else:
+                bt.logging.warning(
+                    f"[REPUTATION_BROADCAST] Rejected from {sender[:12]}.. "
+                    f"epoch={synapse.epoch} reason={reason}")
         except Exception as e:
             bt.logging.debug(f"[REPUTATION_BROADCAST] Failed to ingest: {e}")
         return synapse

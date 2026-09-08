@@ -28,6 +28,7 @@ spacy==3.8.14
 # spaCy transformer model, pinned as a wheel URL so `pip install -r` pulls it (no separate `spacy download`):
 en_core_web_trf @ https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
 gliner==0.2.27           # urchade/gliner_base + urchade/gliner_multi-v2.1
+rapidfuzz==3.9.7          # deterministic fuzzy alignment for quote grounding
 wordfreq==3.1.1            # deterministic word-frequency table -> common-word ticker ambiguity gate
 flair==0.15.1            # flair/ner-english-ontonotes-large (English path)
 # refined (Amazon ReFinED, aida_model + wikidata English entity linking) is NOT on PyPI.

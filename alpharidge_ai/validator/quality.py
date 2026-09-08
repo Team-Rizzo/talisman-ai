@@ -225,9 +225,11 @@ class Faithfulness:
                         + cw * math.log(max(c, 1e-6)))
 
 
-def graded_score(sub, ref, article, emb, rarity, faith):
+def graded_score(sub, ref, article, emb, rarity):
     """Continuous per-article score in [0,1]. `sub`/`ref` are model_dump dicts,
-    `article` has title/content, `faith` is a Faithfulness instance."""
-    c = composite(sub, ref, article, emb, rarity)
-    f = faith.score(sub, article)
-    return min(max(0.0, c), max(0.0, f))
+    `article` has title/content.
+
+    Reference-free faithfulness is not a term here; it stays a liveness gate, scored
+    separately via GradedScorer.faithfulness.
+    """
+    return min(1.0, max(0.0, composite(sub, ref, article, emb, rarity)))

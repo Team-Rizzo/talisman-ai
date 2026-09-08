@@ -386,6 +386,15 @@ EMISSION_GAIN               = float(os.getenv("EMISSION_GAIN", "100.0"))
 EMISSION_BONUS_CEILING      = float(os.getenv("EMISSION_BONUS_CEILING", "0.0"))
 EMISSION_BONUS_START        = float(os.getenv("EMISSION_BONUS_START", "0.63"))
 EMISSION_BONUS_FULL         = float(os.getenv("EMISSION_BONUS_FULL", "0.75"))
+# Observations required before reputation may move a hotkey's multiplier. Below it the
+# multiplier is neutral 1.0 (see reputation.emission).
+EMISSION_N_MIN              = int(os.getenv("EMISSION_N_MIN", "100"))
+# Run the keyed audit and log what it would observe. Off by default: it spends on
+# grader calls and writes nothing, so it is opt-in per validator.
+AUDIT_SHADOW_ENABLED        = _as_bool(os.getenv("AUDIT_SHADOW_ENABLED", "false"))
+# Reference analyses the audit may run per batch beyond the acceptance sample. Bounds
+# both the grader spend and how long one batch can take to validate.
+AUDIT_MAX_PER_BATCH         = int(os.getenv("AUDIT_MAX_PER_BATCH", "4"))
 VALIDATION_SAMPLE_SIZE      = int(os.getenv("VALIDATION_SAMPLE_SIZE", "1"))
 SUMMARY_AGREEMENT_FLOOR     = float(os.getenv("SUMMARY_AGREEMENT_FLOOR", "0.4"))
 SAMPLING_SUBSTANTIVE_WEIGHT = float(os.getenv("SAMPLING_SUBSTANTIVE_WEIGHT", "2.0"))
@@ -449,6 +458,9 @@ _REMOTE_CONFIG_KEYS = {
     "EMISSION_BONUS_CEILING":     (float, "EMISSION_BONUS_CEILING"),
     "EMISSION_BONUS_START":       (float, "EMISSION_BONUS_START"),
     "EMISSION_BONUS_FULL":        (float, "EMISSION_BONUS_FULL"),
+    "EMISSION_N_MIN":             (int,   "EMISSION_N_MIN"),
+    "AUDIT_SHADOW_ENABLED":       (_as_bool, "AUDIT_SHADOW_ENABLED"),
+    "AUDIT_MAX_PER_BATCH":        (int,   "AUDIT_MAX_PER_BATCH"),
     "VALIDATION_SAMPLE_SIZE":     (int,   "VALIDATION_SAMPLE_SIZE"),
     "SAMPLING_SUBSTANTIVE_WEIGHT":(float, "SAMPLING_SUBSTANTIVE_WEIGHT"),
     "SUMMARY_AGREEMENT_FLOOR":    (float, "SUMMARY_AGREEMENT_FLOOR"),
@@ -467,6 +479,19 @@ _CONSENSUS_KEYS = {
     "WEIGHT_WINDOW_EPOCHS",
     "WEIGHT_WINDOW_EPOCHS_PREV",
     "WEIGHT_WINDOW_ACTIVE_BLOCK",
+    # Scoring and emission: these decide points and the multiplier applied to them, so
+    # a local override is a weight difference no config push can correct.
+    "REPUTATION_SCORING_ENABLED",
+    "REPUTATION_GATING_ENABLED",
+    "REPUTATION_EMA_ALPHA",
+    "REPUTATION_PRIOR",
+    "EMISSION_MIDPOINT",
+    "EMISSION_GAIN",
+    "EMISSION_BONUS_CEILING",
+    "EMISSION_BONUS_START",
+    "EMISSION_BONUS_FULL",
+    "EMISSION_N_MIN",
+    "SAMPLING_SUBSTANTIVE_WEIGHT",
 }
 
 REMOTE_CONFIG_REFRESH_SECONDS = int(os.getenv("REMOTE_CONFIG_REFRESH_SECONDS", "3600"))

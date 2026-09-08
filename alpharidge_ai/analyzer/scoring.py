@@ -26,6 +26,8 @@ from .relevance import AssetRelevanceAnalyzer, PostClassification
 from .telegram_relevance import TelegramRelevanceAnalyzer, MessageGroupClassification
 from .news_relevance import NewsRelevanceAnalyzer, ArticleClassification
 from alpharidge_ai.utils.api_models import NewsArticleForScoring
+from alpharidge_ai.oracle import floor as oracle_floor
+from alpharidge_ai.oracle import schema_gate
 from alpharidge_ai.models.article_intelligence import ArticleIntelligence
 
 
@@ -1500,6 +1502,60 @@ def _reference_clearly_irrelevant(intel) -> bool:
     return sector not in _MARKET_ADJACENT_SECTORS
 
 
+def _floor_sweep(miner_batch, reference_by_id=None, *, block: int = 0,
+                 schema_cutover_block: int = 0) -> Dict[int, bool]:
+    """Run the deterministic floor over every article in a batch.
+
+    Returns {article_id: passed}. An article whose analysis will not even load fails;
+    an article the validator has no reference text for is left out rather than failed,
+    since that is the validator's own gap.
+    """
+    results: Dict[int, bool] = {}
+    for article in miner_batch or []:
+        try:
+            aid = int(getattr(article, "id", 0))
+        except (TypeError, ValueError):
+            continue
+
+        ref = (reference_by_id or {}).get(str(getattr(article, "id", "")))
+        text = getattr(ref or article, "content", None)
+        if not text:
+            continue
+
+        blob = getattr(getattr(article, "analysis", None), "analysis_data", None)
+        if not blob or not isinstance(blob, dict):
+            results[aid] = False
+            continue
+        try:
+            intel = ArticleIntelligence(**blob)
+        except Exception:
+            results[aid] = False
+            continue
+
+        # After the cutover block a submission on the old schema earns nothing.
+        if schema_cutover_block:
+            verdict = schema_gate.evaluate(
+                getattr(intel, "schema_version", None), block=int(block),
+                cutover_block=int(schema_cutover_block), intel=intel)
+            if not verdict.accepted:
+                bt.logging.info(
+                    f"[FLOOR] id={aid} rejected: {verdict.reason}")
+                results[aid] = False
+                continue
+
+        title = getattr(ref or article, "title", None) or ""
+        claimed_hash = getattr(getattr(intel, "event_fingerprint", None),
+                               "content_hash", None)
+        try:
+            result = oracle_floor.evaluate(
+                intel, text, claimed_hash=claimed_hash,
+                expected_hash=ArticleIntelligence.compute_content_hash(title, text))
+            results[aid] = bool(result.floor_pass)
+        except Exception as e:
+            bt.logging.debug(f"[FLOOR] evaluation failed id={aid}: {e}")
+    return results
+
+
 def validate_miner_article_intelligence_batch(
     miner_batch: List[NewsArticleForScoring],
     analyzer,
@@ -1508,6 +1564,9 @@ def validate_miner_article_intelligence_batch(
     graded_scorer=None,
     reference_by_id=None,
     miner_hotkey=None,
+    auditor=None,
+    block=0,
+    schema_cutover_block=0,
 ) -> Tuple[bool, Dict]:
     """Validate a miner's article batch using V2 4-tier validation.
 
@@ -1543,10 +1602,17 @@ def validate_miner_article_intelligence_batch(
 
     bt.logging.info(f"[V2_VALIDATE] Sampling {sample_size} article(s) from batch of {len(miner_batch)}")
 
+    # Per-article floor over the WHOLE batch, not just the sample. Cheap and
+    # deterministic, so volume can be credited per article that clears it rather
+    # than on one verdict for the batch.
+    floor_results = _floor_sweep(miner_batch, reference_by_id, block=block,
+                                 schema_cutover_block=schema_cutover_block)
+
     matches = 0
     total_composite = 0.0
     discrepancies = []
     observations = []  # (article_id, graded, weight) when graded_scorer is set
+    audit_observations = []  # keyed-audit results, shadow only
     faithfulness_scores = []  # reference-free faithfulness per sampled article
     reference_irrelevant = []  # (article_id, bool) — True when our own reference
     # says the article is clearly outside the rubric; feeds triage FP events
@@ -1616,6 +1682,22 @@ def validate_miner_article_intelligence_batch(
                 "composite_score": composite, "details": details,
             })
 
+        if auditor is not None:
+            # Runs only on articles already analysed here, so it adds no reference
+            # analysis of its own. Full keyed coverage needs selection to drive the
+            # analysis, which is the change that carries the grader load.
+            try:
+                text = getattr(src, "content", None) or ""
+                seen = _floor_sweep([article], reference_by_id).get(int(article.id))
+                if seen:
+                    result = oracle_floor.evaluate(miner_intel, text)
+                    observed = auditor.audit(int(article.id), text, miner_intel,
+                                             validator_intel, result, int(block))
+                    if observed is not None:
+                        audit_observations.append(observed)
+            except Exception as e:
+                bt.logging.debug(f"[AUDIT] failed on {getattr(article, 'id', '?')}: {e}")
+
         if graded_scorer is not None:
             try:
                 g, w = graded_scorer.score(miner_intel, validator_intel, article)
@@ -1634,6 +1716,58 @@ def validate_miner_article_intelligence_batch(
             else:
                 bt.logging.debug(
                     f"[FAITHFULNESS] skipped id={getattr(src, 'id', '?')} — content too short")
+
+    # The random sample above decides batch acceptance; quality auditing is selected
+    # by key. Capped per batch so one batch cannot run unbounded analyses.
+    if auditor is not None:
+        already = {int(getattr(a, "id", 0)) for a in sampled}
+        cap = int(_cfg_get("AUDIT_MAX_PER_BATCH", 4))
+        picked = 0
+        for article in miner_batch:
+            if picked >= cap:
+                bt.logging.debug(
+                    f"[AUDIT] per-batch cap {cap} reached; "
+                    f"{len(miner_batch) - len(already)} article(s) left unwatched")
+                break
+            try:
+                aid = int(getattr(article, "id", 0))
+            except (TypeError, ValueError):
+                continue
+            if aid in already:
+                continue
+
+            ref = (reference_by_id or {}).get(str(getattr(article, "id", "")))
+            src = ref or article
+            text = getattr(src, "content", None) or ""
+            if not text or not auditor.selects(aid, text, int(block)):
+                continue
+
+            blob = getattr(getattr(article, "analysis", None), "analysis_data", None)
+            if not blob or not isinstance(blob, dict):
+                continue
+            try:
+                miner_intel = ArticleIntelligence(**blob)
+            except Exception:
+                continue
+            if not _floor_sweep([article], reference_by_id, block=block,
+                                schema_cutover_block=schema_cutover_block).get(aid):
+                continue
+
+            picked += 1
+            try:
+                validator_intel = analyzer.analyze(
+                    article_id=article.id, url=src.url, title=src.title,
+                    source=src.source, published=src.published, summary=src.summary,
+                    content=src.content, raw_html=getattr(src, "raw_html", None))
+                if validator_intel is None:
+                    continue
+                result = oracle_floor.evaluate(miner_intel, text)
+                observed = auditor.audit(aid, text, miner_intel, validator_intel,
+                                         result, int(block))
+                if observed is not None:
+                    audit_observations.append(observed)
+            except Exception as e:
+                bt.logging.debug(f"[AUDIT] keyed pass failed on {aid}: {e}")
 
     # Cross-article adversarial detection: cloned embeddings.
     # Legacy rule (default): flag any within-batch title-embedding pair with cosine
@@ -1695,6 +1829,8 @@ def validate_miner_article_intelligence_batch(
         "observations": observations,
         "faithfulness_scores": faithfulness_scores,
         "reference_irrelevant": reference_irrelevant,
+        "floor_results": floor_results,
+        "audit_observations": audit_observations,
     }
 
     if batch_valid:

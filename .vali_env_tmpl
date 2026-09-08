@@ -35,6 +35,14 @@ LLM_CACHE_MAX_SIZE=1024
 # Fraction of received attestations to deep-verify against the API (default 0.1).
 # DEEP_VERIFY_SAMPLE_RATE=0.1
 
+# --- What can and cannot be overridden here ---
+# This file configures PLUMBING: keys, URLs, timeouts, concurrency. It does not
+# configure ECONOMICS. Scoring, emission and settlement keys are consensus keys: an
+# OVERRIDE_ on one of them is logged and ignored, because a validator running a
+# different value produces weights no config push can reconcile. Setting one does not
+# pin it, it only hides that the served value is what applies. Run
+# `python scripts/check_vali_env.py` to list any that are present.
+#
 # --- Adaptive dispatch (RFC 2026-06-28) ---
 # These are served subnet-wide by the API (/config/subnet) with safe defaults, so you
 # normally do NOT set them here. To FORCE a per-validator value (e.g. the Stage A pilot

@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "publish_block": 0,
+  "activation_block": 0,
+  "schema_version": "1.2.0",
+  "settlement": {
+    "C": 1.0,
+    "floor_gating": true,
+    "live": false
+  },
+  "emission": {
+    "midpoint": 0.5,
+    "gain": 1.0,
+    "ceiling": 0.0,
+    "bonus_start": 0.5,
+    "bonus_full": 0.5,
+    "n_min": 0,
+    "ema_alpha": 0.01
+  },
+  "rations": {
+    "explore": 1.0,
+    "probe_day": 1.0,
+    "alpha_day": 0.01,
+    "cap": 1.0,
+    "slack_target": 0.0,
+    "fill_gate": 1.0,
+    "boost": 1.0,
+    "boost_days": 0,
+    "boost_tranche_max": 0.0
+  },
+  "oracle": {
+    "pool_tiers": ["number_bearing"],
+    "keyed_rate_pool": 0.0,
+    "keyed_rate_keeper": 0.0,
+    "claim_cap": 1,
+    "keeper_weight": 0.0,
+    "grader_models": [
+      {"id": "REPLACE_ME", "weight": 1.0}
+    ],
+    "schema_cutover_block": 0
+  },
+  "controller": {
+    "roi_lo": 1.0,
+    "roi_hi": 2.0,
+    "arm_days": 1,
+    "max_step": 0.01,
+    "gap_days": 1,
+    "cost_per_point": 0.000001
+  }
+}
