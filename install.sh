@@ -35,7 +35,7 @@ pip install ujson nltk Unidecode lmdb prettyprint
 echo
 echo "✅ Environment ready (./.venv)."
 echo "Next:"
-echo "  1. cp .miner_env_tmpl .miner_env      # validators: cp .vali_env_tmpl .vali_env"
+echo "  1. cp miner_env.example .miner_env      # validators: cp vali_env.example .vali_env"
 echo "  2. add your OpenRouter API key to it  (API_KEY=sk-or-...)"
 echo "  3. start your neuron with ./.venv/bin/python  (e.g. via pm2)"
 echo "     First boot downloads ~44 GB of models (one-time) — let it finish before it serves."

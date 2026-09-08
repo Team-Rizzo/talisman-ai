@@ -106,7 +106,7 @@ pip install ujson nltk Unidecode lmdb prettyprint
 ### 3. Configure
 
 ```bash
-cp .miner_env_tmpl .miner_env
+cp miner_env.example .miner_env
 ```
 
 **For a standard setup you only need to set one value: `API_KEY`.** Everything else in the template is pre-filled.
@@ -265,7 +265,7 @@ A lease you sit on isn't lost to the network, since it goes back in the pool and
 
 ### Miner (`.miner_env`)
 
-Copy `.miner_env_tmpl` to `.miner_env`. Only `API_KEY` normally needs changing.
+Copy `miner_env.example` to `.miner_env`. Only `API_KEY` normally needs changing.
 
 | Variable | Description |
 |---|---|
@@ -277,7 +277,7 @@ Copy `.miner_env_tmpl` to `.miner_env`. Only `API_KEY` normally needs changing.
 
 ### Validator (`.vali_env`)
 
-Copy `.vali_env_tmpl` to `.vali_env`. Same rule: `API_KEY` is normally the only required edit.
+Copy `vali_env.example` to `.vali_env`. Same rule: `API_KEY` is normally the only required edit.
 
 | Variable | Description |
 |---|---|
@@ -300,7 +300,7 @@ Copy `.vali_env_tmpl` to `.vali_env`. Same rule: `API_KEY` is normally the only 
 Same install and same hardware as a miner.
 
 ```bash
-cp .vali_env_tmpl .vali_env
+cp vali_env.example .vali_env
 # Set API_KEY. MODEL / LLM_BASE / MINER_API_URL are pre-filled.
 
 .venv/bin/python -m neurons.validator \
