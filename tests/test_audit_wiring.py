@@ -69,3 +69,26 @@ def test_observations_are_returned_not_recorded():
     from alpharidge_ai.oracle import runner
     source = inspect.getsource(runner)
     assert "record_local" not in source
+
+
+def test_shadow_flag_alone_builds_the_auditor(monkeypatch):
+    """Shadow mode must reach the auditor before the oracle is live. The build used to
+    be gated on oracle_live at the call site, so the flag was read and never acted on."""
+    import types
+    from neurons.validator import Validator
+    from alpharidge_ai.oracle import audit_key
+    from alpharidge_ai.oracle import grader as grader_mod
+
+    monkeypatch.setattr(config, "AUDIT_SHADOW_ENABLED", True)
+    monkeypatch.setattr(audit_key, "load", lambda *a, **k: b"\x01" * audit_key.KEY_BYTES)
+    monkeypatch.setattr(grader_mod, "Grader", lambda *a, **k: object())
+    fake = types.SimpleNamespace(
+        _auditor=None,
+        _mechanism_profile=types.SimpleNamespace(resolve=lambda block: None),
+        _oracle_is_live=lambda: False,
+    )
+    assert Validator._get_auditor(fake) is not None
+
+    monkeypatch.setattr(config, "AUDIT_SHADOW_ENABLED", False)
+    fake._auditor = None
+    assert Validator._get_auditor(fake) is None
