@@ -54,6 +54,19 @@ ADJUDICATION_TOOL = {
     },
 }
 
+# Judgment vocabularies, mirrored from the submission schema
+# (models.article_intelligence: Sentiment, ImpactPotential, Urgency, ArticleContentType).
+# They must stay in step: keeper_agreement scores these fields by exact string match, so a
+# grader that does not share the vocabulary cannot agree with any submission.
+_SENTIMENT = ("very_bullish", "bullish", "slightly_bullish", "neutral",
+              "slightly_bearish", "bearish", "very_bearish")
+_IMPACT = ("critical", "high", "medium", "low", "negligible")
+_URGENCY = ("flash", "breaking", "developing", "same_day", "evergreen")
+_CONTENT_TYPE = ("breaking_news", "analysis", "opinion", "earnings", "regulatory",
+                 "research", "press_release", "interview", "market_recap",
+                 "data_release", "forecast", "investigative", "tutorial", "listicle",
+                 "sponsored", "other")
+
 JUDGMENT_TOOL = {
     "type": "function",
     "function": {
@@ -62,10 +75,13 @@ JUDGMENT_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "overall_sentiment": {"type": "string"},
-                "impact_potential": {"type": "string"},
-                "urgency": {"type": "string"},
-                "content_type": {"type": "string"},
+                # Constrained to the submission vocabulary. keeper_agreement compares
+                # these by exact match, so an unconstrained grader answers in prose
+                # ("neutral to positive") and the field scores zero for every miner.
+                "overall_sentiment": {"type": "string", "enum": list(_SENTIMENT)},
+                "impact_potential": {"type": "string", "enum": list(_IMPACT)},
+                "urgency": {"type": "string", "enum": list(_URGENCY)},
+                "content_type": {"type": "string", "enum": list(_CONTENT_TYPE)},
                 "assets": {"type": "array", "items": {"type": "string"}},
                 "entities": {"type": "array", "items": {"type": "string"}},
             },
@@ -88,6 +104,10 @@ ADJUDICATION_PROMPT = (
 
 JUDGMENT_PROMPT = (
     "Classify the article below.\n\n"
+    "`assets` must be ticker symbols only (e.g. AAPL), never descriptive phrases such as "
+    "\"oil and gas sector\". `entities` are the proper names of organisations, people and "
+    "places. Both are compared against a submission by set overlap, so a phrase where a "
+    "ticker belongs scores nothing.\n\n"
     "ARTICLE:\n{article}\n"
 )
 
