@@ -891,6 +891,89 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.debug(f"[RATION] observe failed: {e}")
 
+    def _apply_legacy_outcome(self, article_batch, miner_hotkey, gated_out=None):
+        """Store + reward outcomes for a batch outside the triage lanes.
+
+        A peer of _apply_triage_outcome and _apply_verification_outcome. Extracted so
+        that all three lanes are callable in isolation and the shared gate can be
+        exercised against each of them; it previously sat inline in the response
+        handler, which is the one lane a test could not reach without standing up the
+        whole handler.
+
+        Prices by content length. The triage lanes price differently; only the gate is
+        shared. See _credit_gate.
+        """
+        gated_out = gated_out or (lambda _aid: False)
+        for article in article_batch:
+            if self._canary_pool.label_of(int(article.id)) is not None:
+                # Canaries are graded only, in every lane and era.
+                try:
+                    self._article_store.reset_to_unprocessed(article.id)
+                except Exception:
+                    pass
+                continue
+            try:
+                self._article_store.update_article(article.id, article)
+            except Exception:
+                self._article_store.add_article(article, article_id=article.id, hotkey=miner_hotkey, set_as_processing=False, overwrite=True)
+
+            try:
+                self._article_store.set_processed(article.id)
+            except Exception:
+                pass
+
+            if not self._article_store.is_rewarded(article.id):
+                if gated_out(article.id):
+                    # Cleared validation as part of the batch, but this article did
+                    # not clear the floor on its own, so it earns nothing.
+                    continue
+                content_len = len(article.content or "") if article.content else 0
+                if content_len >= 2000:
+                    weight = 3
+                elif content_len >= 500:
+                    weight = 2
+                else:
+                    weight = 1
+                self._miner_reward.add_reward(miner_hotkey, weight)
+                self._article_pay[str(article.id)] = float(weight)
+                try:
+                    self._article_store.mark_rewarded(article.id)
+                except Exception:
+                    pass
+
+    def _credit_gate(self, miner_hotkey, article_batch, validation_result):
+        """The floor decision and the ration observation, for every lane.
+
+        Returns a predicate: True when this article must not earn credit.
+
+        This lives in one place because all three outcome lanes must consult the same
+        rule. It deliberately does NOT decide how much an article pays: the triage and
+        verification lanes price by relevance multiplier over the assignee count, the
+        legacy lane by content length. Folding the payout in here would change triage
+        pay, so only the gate and the ration observation are shared.
+
+        Both floor reads previously sat inside the legacy `else:` branch, which the
+        triage lanes do not reach, so the gate was consulted on one lane only and the
+        ration observation ran on one lane only.
+        """
+        floor_results = (validation_result or {}).get("floor_results") or {}
+        profile = self._mechanism_profile.resolve(int(self.block))
+        floor_gating = bool(profile.settlement.floor_gating) if profile else False
+
+        failed = [aid for aid, ok in floor_results.items() if not ok]
+        if failed:
+            bt.logging.info(
+                f"[FLOOR] hk={miner_hotkey} failed={len(failed)}/"
+                f"{len(floor_results)} gating={'on' if floor_gating else 'shadow'}")
+
+        # Standing moves on validated work in every lane, gated or not.
+        self._observe_ration(miner_hotkey, article_batch, floor_results)
+
+        if not floor_gating:
+            return lambda _aid: False
+        blocked = {int(aid) for aid, ok in floor_results.items() if ok is False}
+        return lambda aid: int(aid) in blocked
+
     def _get_graded_scorer(self):
         if self._graded_scorer is None:
             from alpharidge_ai.validator.graded_scorer import GradedScorer
@@ -1174,7 +1257,7 @@ class Validator(BaseValidatorNeuron):
         )
 
     def _apply_triage_outcome(self, article_batch, miner_hotkey, triage_res, fp_ids,
-                              sent_by_id=None, full_push=True):
+                              sent_by_id=None, full_push=True, gated_out=None):
         """Store + reward outcomes for a passing v3 batch. Relevant ->
         processed; uncontradicted irrelevant -> processed with a rebuilt
         triage-only analysis; borderline/contradicted -> back to the pool;
@@ -1186,6 +1269,8 @@ class Validator(BaseValidatorNeuron):
         discard_ids = set(triage_res.borderline_discard_ids)
         retire_ids = set(triage_res.retire_candidate_ids) | discard_ids
         canary_ids = set(triage_res.canary_ids)
+        # The floor gate is shared with every other lane; see _credit_gate.
+        gated_out = gated_out or (lambda _aid: False)
         # Each article's pot is split across the assignees recorded at
         # dispatch.
         total_pay = sum(TRIAGE_CFG.fee_points / self._k_for(a.id)
@@ -1198,6 +1283,7 @@ class Validator(BaseValidatorNeuron):
             if aid in canary_ids:
                 # Graded, never stored; analysed positives pay per miner.
                 if (aid in relevant_ids and aid not in fp_ids
+                        and not gated_out(aid)
                         and self._has_full_analysis(article)):
                     content_len = len(article.content or "")
                     weight = 3 if content_len >= 2000 else (2 if content_len >= 500 else 1)
@@ -1226,6 +1312,7 @@ class Validator(BaseValidatorNeuron):
                 except Exception:
                     pass
                 if (aid in keep_ids and aid not in fp_ids
+                        and not gated_out(aid)
                         and not self._article_store.is_rewarded(article.id)):
                     content_len = len(article.content or "")
                     weight = 3 if content_len >= 2000 else (2 if content_len >= 500 else 1)
@@ -1250,12 +1337,15 @@ class Validator(BaseValidatorNeuron):
         self._attribute_pay(per_article, payout)
 
     def _apply_verification_outcome(self, article_batch, miner_hotkey, triage_res, fp_ids,
-                                    miner_signatures=None, nonces=None, epoch=None):
+                                    miner_signatures=None, nonces=None, epoch=None,
+                                    gated_out=None):
         """Pay a verification response at the split rate and keep its analyses
         as variants. No store interaction — the primary owns the article."""
         keep_ids = set(triage_res.relevant_ids) | set(triage_res.borderline_valuable_ids)
         discard_ids = set(triage_res.borderline_discard_ids)
         canary_ids = set(triage_res.canary_ids)
+        # The floor gate is shared with every other lane; see _credit_gate.
+        gated_out = gated_out or (lambda _aid: False)
         # No fee floor in this lane.
         total_pay = sum(TRIAGE_CFG.fee_points / self._k_for(a.id)
                         for a in article_batch)
@@ -1269,7 +1359,8 @@ class Validator(BaseValidatorNeuron):
             per_article[aid] = TRIAGE_CFG.fee_points / k
             content_len = len(article.content or "")
             weight = 3 if content_len >= 2000 else (2 if content_len >= 500 else 1)
-            if aid in keep_ids and self._has_full_analysis(article):
+            if (aid in keep_ids and not gated_out(aid)
+                    and self._has_full_analysis(article)):
                 total_pay += TRIAGE_CFG.rel_point_mult * weight / k
                 per_article[aid] += TRIAGE_CFG.rel_point_mult * weight / k
             variants.append(article)
@@ -1565,60 +1656,19 @@ class Validator(BaseValidatorNeuron):
             self._adaptive_metrics.incr("valid")
             self._adaptive_metrics.mark_scored(miner_hotkey)
         self._article_cooldown.record_batch_valid(miner_hotkey, latency_s)
+        gated_out = self._credit_gate(miner_hotkey, article_batch, validation_result)
+
         if triage_active and verification:
             self._apply_verification_outcome(
                 article_batch, miner_hotkey, triage_res, fp_ids,
-                miner_signatures, nonces, self._miner_reward._get_current_epoch())
+                miner_signatures, nonces, self._miner_reward._get_current_epoch(),
+                gated_out=gated_out)
         elif triage_active:
             self._apply_triage_outcome(article_batch, miner_hotkey, triage_res, fp_ids,
                                        {int(a.id): a for a in sent_batch},
-                                       full_push=full_push)
+                                       full_push=full_push, gated_out=gated_out)
         else:
-            floor_results = (validation_result or {}).get("floor_results") or {}
-            floor_gating = bool(_profile.settlement.floor_gating) if _profile else False
-            floor_failed = [aid for aid, ok in floor_results.items() if not ok]
-            if floor_failed:
-                bt.logging.info(
-                    f"[FLOOR] hk={miner_hotkey} failed={len(floor_failed)}/"
-                    f"{len(floor_results)} gating={'on' if floor_gating else 'shadow'}")
-            self._observe_ration(miner_hotkey, article_batch, floor_results)
-
-            for article in article_batch:
-                if self._canary_pool.label_of(int(article.id)) is not None:
-                    # Canaries are graded only, in every lane and era.
-                    try:
-                        self._article_store.reset_to_unprocessed(article.id)
-                    except Exception:
-                        pass
-                    continue
-                try:
-                    self._article_store.update_article(article.id, article)
-                except Exception:
-                    self._article_store.add_article(article, article_id=article.id, hotkey=miner_hotkey, set_as_processing=False, overwrite=True)
-
-                try:
-                    self._article_store.set_processed(article.id)
-                except Exception:
-                    pass
-
-                if not self._article_store.is_rewarded(article.id):
-                    if floor_gating and floor_results.get(int(article.id)) is False:
-                        # Cleared validation as part of the batch, but this article did
-                        # not clear the floor on its own, so it earns nothing.
-                        continue
-                    content_len = len(article.content or "") if article.content else 0
-                    if content_len >= 2000:
-                        weight = 3
-                    elif content_len >= 500:
-                        weight = 2
-                    else:
-                        weight = 1
-                    self._miner_reward.add_reward(miner_hotkey, weight)
-                    self._article_pay[str(article.id)] = float(weight)
-                    try:
-                        self._article_store.mark_rewarded(article.id)
-                    except Exception:
-                        pass
+            self._apply_legacy_outcome(article_batch, miner_hotkey, gated_out=gated_out)
 
         if not verification:
             current_epoch = self._miner_reward._get_current_epoch()
