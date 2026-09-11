@@ -51,7 +51,7 @@ def test_parses_a_valid_profile():
 
 @pytest.mark.parametrize("section,key,bad", [
     ("emission", "gain", 0.5),          # below the sane floor
-    ("emission", "gain", 51.0),
+    ("emission", "gain", 201.0),   # above the widened upper bound
     ("emission", "ceiling", 3.5),
     ("emission", "midpoint", 1.5),
     ("settlement", "C", 0.0),

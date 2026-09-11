@@ -128,7 +128,11 @@ class Emission:
             raise ProfileError(f"emission.bonus_full={full} below bonus_start={start}")
         return Emission(
             midpoint=_num("emission", d, "midpoint", 0.0, 1.0),
-            gain=_num("emission", d, "gain", 1.0, 50.0),
+            # The upper bound must cover the range the curve is expected to take, or a
+            # profile cannot express a running configuration and "publish a no-op"
+            # becomes impossible — every first publish would then carry an unintended
+            # economic change.
+            gain=_num("emission", d, "gain", 1.0, 200.0),
             ceiling=_num("emission", d, "ceiling", 0.0, 3.0),
             bonus_start=start,
             bonus_full=full,
